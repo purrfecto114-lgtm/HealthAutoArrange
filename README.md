@@ -121,4 +121,7 @@ dotnet test HealthAutoArrange.Tests/HealthAutoArrange.Tests.csproj
 
 ## 许可证
 
-当前仓库未授予开源许可证，默认保留全部权利。
+MIT LICENSE
+
+## 辅助
+gpt 5.6 sol
