@@ -135,7 +135,7 @@ dotnet test HealthAutoArrange.Tests/HealthAutoArrange.Tests.csproj
 
 `python3 tools/static_smoke.py` 当前覆盖 **56 项源码契约**：双语按钮/持久化、提醒 episode 保留、排序关闭但提醒继续、刷新窗口元数据、语义数字 ID、`#` 严重度族、NaN/Infinity 防护、窄布局等。它不是 C# 编译器，也不是游戏内测试。
 
-本次执行环境没有可用 `dotnet/msbuild/csc/mono`，容器 DNS 也无法解析 GitHub/NuGet/.NET 下载域名，因此没有冒充“已编译/已跑 xUnit”。最终发布前仍必须在持有当前游戏 Managed DLL 的 Windows 环境执行下面的 `dotnet test` 与 `dotnet build`。
+v1.1.3 已在 Windows 本机完成 `dotnet test`（206/206 通过）与 Release 构建（0 警告/0 错误），实机游戏内验证仍需按 `SMOKE_TEST.md` 执行。
 
 ## 仍需实机验证（不能用静态测试代替）
 
@@ -145,7 +145,7 @@ dotnet test HealthAutoArrange.Tests/HealthAutoArrange.Tests.csproj
 - QoL: Unknown、CUCoreLib、自定义 Moodle Mod 并装时是否有 Harmony 顺序或重建闪烁。
 - Unchipped / chipped、感染揭示、critical 状态、层切换/重生后的目录观察是否符合预期。
 
-详见 `PRACTICAL_REVIEW_20260809.md` 与 `SMOKE_TEST.md`。
+详见 `SMOKE_TEST.md`。
 
 ## 许可证
 
