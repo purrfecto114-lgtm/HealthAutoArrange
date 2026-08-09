@@ -1,4 +1,4 @@
-# HealthAutoArrange 1.1.1 (source)
+# HealthAutoArrange
 
 《Casualties: Unknown》状态图标（Moodle）**客户端 UI 排序器**。设计目标是保守地重新排列游戏已经生成的图标，而不是重新实现医疗系统。
 
