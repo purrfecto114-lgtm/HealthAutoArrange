@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Static smoke
+        run: python3 tools/static_smoke.py
+
+      - name: Restore
+        run: dotnet restore HealthAutoArrange.Tests/HealthAutoArrange.Tests.csproj
+
+      - name: Run tests (Release)
+        run: dotnet test HealthAutoArrange.Tests/HealthAutoArrange.Tests.csproj --configuration Release --no-restore

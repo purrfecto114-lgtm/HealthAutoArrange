@@ -1,0 +1,72 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace HealthAutoArrange.Core
+{
+    /// <summary>添加提醒规则的结果。</summary>
+    public sealed class ReminderRuleAddResult
+    {
+        /// <summary>是否成功添加。</summary>
+        public bool Added { get; }
+
+        /// <summary>冲突时已存在的规则名；无冲突为 null。</summary>
+        public string ConflictRule { get; }
+
+        /// <summary>诊断消息。</summary>
+        public string Message { get; }
+
+        public ReminderRuleAddResult(bool added, string conflictRule, string message)
+        {
+            Added = added;
+            ConflictRule = conflictRule;
+            Message = message ?? string.Empty;
+        }
+    }
+
+    /// <summary>
+    /// 提醒规则基础模型：相同基础状态只能有一个规则（去重）；
+    /// 规则状态为系统生成的通配模式（baseId + "*"）；保留 cooldown。
+    /// 纯 C#，无 Unity 依赖，可单元测试。
+    /// </summary>
+    public sealed class ReminderRuleEditor
+    {
+        private readonly List<ReminderRule> _rules = new List<ReminderRule>();
+
+        /// <summary>当前规则（按添加顺序）。</summary>
+        public IReadOnlyList<ReminderRule> Rules => _rules;
+
+        /// <summary>
+        /// 按基础状态添加规则；相同基础状态已存在时返回冲突（首次优先）。
+        /// </summary>
+        public ReminderRuleAddResult AddRule(
+            string stateOrBase, bool enabled, ReminderMode mode, double cooldownSeconds)
+        {
+            var baseId = MoodleIdentity.BaseId(stateOrBase);
+            if (baseId.Length == 0) return new ReminderRuleAddResult(false, null, "empty state");
+
+            foreach (var rule in _rules)
+            {
+                if (string.Equals(BaseOf(rule), baseId, StringComparison.OrdinalIgnoreCase))
+                    return new ReminderRuleAddResult(false, rule.Name, $"rule for '{baseId}' already exists");
+            }
+
+            _rules.Add(new ReminderRule(baseId, baseId + "*", enabled, mode, Math.Max(0, cooldownSeconds)));
+            return new ReminderRuleAddResult(true, null, "added");
+        }
+
+        /// <summary>按基础状态移除规则；成功返回 true。</summary>
+        public bool RemoveRule(string stateOrBase)
+        {
+            var baseId = MoodleIdentity.BaseId(stateOrBase);
+            return _rules.RemoveAll(r => string.Equals(BaseOf(r), baseId, StringComparison.OrdinalIgnoreCase)) > 0;
+        }
+
+        private static string BaseOf(ReminderRule rule)
+        {
+            var state = rule.State ?? string.Empty;
+            if (state.EndsWith("*", StringComparison.Ordinal)) state = state.Substring(0, state.Length - 1);
+            return MoodleIdentity.BaseId(state);
+        }
+    }
+}

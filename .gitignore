@@ -1,0 +1,38 @@
+# Build output
+bin/
+obj/
+TestResults/
+artifacts/
+
+# IDE / editor
+.vs/
+.vscode/
+.idea/
+docs/superpowers/
+
+# Local-only configuration
+HealthAutoArrange.Local.props
+
+# Game / BepInEx runtime files
+BepInEx/
+*.cfg
+LogOutput.log
+
+# Archives and packages
+*.zip
+*.nupkg
+
+# Secrets, keys and certificates
+.env
+.env.*
+*.key
+*.pfx
+*.pem
+*.crt
+*.cer
+
+# Game assemblies (never committed)
+Assembly-CSharp.dll
+UnityEngine*.dll
+BepInEx.dll
+0Harmony.dll

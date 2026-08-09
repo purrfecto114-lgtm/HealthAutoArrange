@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      GAME_REFS_URL: ${{ secrets.GAME_REFS_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Validate GAME_REFS_URL secret
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GAME_REFS_URL)) {
+            throw "Secret GAME_REFS_URL is not configured. Set it to a private URL pointing to the game reference archive before running this workflow."
+          }
+          Write-Host "GAME_REFS_URL is configured."
+
+      - name: Download and extract game references
+        shell: pwsh
+        run: |
+          $gameDir = Join-Path $env:RUNNER_TEMP 'game'
+          New-Item -ItemType Directory -Force -Path $gameDir | Out-Null
+          $refsZip = Join-Path $env:RUNNER_TEMP 'game-refs.zip'
+          Invoke-WebRequest -Uri $env:GAME_REFS_URL -OutFile $refsZip
+          Expand-Archive -Path $refsZip -DestinationPath $gameDir
+          Write-Host "GameDir=$gameDir"
+
+      - name: Run tests
+        run: dotnet test HealthAutoArrange.Tests/HealthAutoArrange.Tests.csproj --configuration Release
+
+      - name: Build Plugin (Release)
+        shell: pwsh
+        run: dotnet build HealthAutoArrange.Plugin/HealthAutoArrange.Plugin.csproj --configuration Release -p:GameDir="$env:RUNNER_TEMP\game"
+
+      - name: Package mod DLLs
+        shell: pwsh
+        run: |
+          $staging = Join-Path $env:RUNNER_TEMP 'staging'
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item 'HealthAutoArrange.Plugin/bin/Release/net472/HealthAutoArrange.Plugin.dll' $staging
+          Copy-Item 'HealthAutoArrange.Core/bin/Release/netstandard2.0/HealthAutoArrange.Core.dll' $staging
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          } else {
+            $version = 'manual'
+          }
+          $zipPath = Join-Path $env:RUNNER_TEMP "HealthAutoArrange-$version.zip"
+          Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zipPath
+          Write-Host "Package=$zipPath"
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_ZIP=$zipPath"
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_VERSION=$version"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HealthAutoArrange-${{ env.RELEASE_VERSION }}
+          path: ${{ env.RELEASE_ZIP }}
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.RELEASE_ZIP }}
+          generate_release_notes: true
