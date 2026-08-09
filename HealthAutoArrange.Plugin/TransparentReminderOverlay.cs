@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using HealthAutoArrange.Core;
 using UnityEngine;
 
@@ -12,13 +13,22 @@ namespace HealthAutoArrange.Plugin
     {
         private const float DesignHeight = 1080f;
         private readonly ReminderPresentation _presentation;
-        private readonly UiTextCatalog _text;
+        private UiTextCatalog _text;
 
         public TransparentReminderOverlay(ReminderPresentation presentation)
+            : this(presentation, Application.systemLanguage.ToString().StartsWith("Chinese", StringComparison.OrdinalIgnoreCase))
+        {
+        }
+
+        public TransparentReminderOverlay(ReminderPresentation presentation, bool chinese)
         {
             _presentation = presentation ?? throw new ArgumentNullException(nameof(presentation));
-            _text = UiTextCatalog.ForLanguage(
-                Application.systemLanguage.ToString().StartsWith("Chinese", StringComparison.OrdinalIgnoreCase));
+            _text = UiTextCatalog.ForLanguage(chinese);
+        }
+
+        public void SetLanguage(bool chinese)
+        {
+            _text = UiTextCatalog.ForLanguage(chinese);
         }
 
         /// <summary>当前系统使用的文案目录；提醒文本本身由 Presentation 模板生成。</summary>
@@ -40,12 +50,17 @@ namespace HealthAutoArrange.Plugin
                 var screenWidth = Screen.width > 0 ? Screen.width / scale : 1280f;
                 var screenHeight = Screen.height > 0 ? Screen.height / scale : 720f;
                 var active = _presentation.Active(now);
+                var stackOffsets = new Dictionary<ReminderPlacementPreset, float>();
                 for (int i = 0; i < active.Count; i++)
                 {
                     var item = active[i];
                     var alpha = _presentation.Alpha(item, now);
                     if (alpha <= 0f || string.IsNullOrEmpty(item.Text)) continue;
-                    DrawItem(item, alpha, i, screenWidth, screenHeight);
+                    var placement = item.Preset.Placement;
+                    var placementKey = placement == null ? ReminderPlacementPreset.Bottom : placement.Preset;
+                    stackOffsets.TryGetValue(placementKey, out var offset);
+                    var height = DrawItem(item, alpha, offset, screenWidth, screenHeight);
+                    stackOffsets[placementKey] = offset + height + 8f;
                 }
             }
             finally
@@ -55,10 +70,10 @@ namespace HealthAutoArrange.Plugin
             }
         }
 
-        private static void DrawItem(
+        private static float DrawItem(
             ReminderPresentationItem item,
             float alpha,
-            int stackIndex,
+            float stackOffset,
             float screenWidth,
             float screenHeight)
         {
@@ -88,7 +103,7 @@ namespace HealthAutoArrange.Plugin
             }
             if (placement.Preset == ReminderPlacementPreset.BottomLeft)
                 x = placement.NormalizedX * screenWidth + placement.PixelOffsetX;
-            y += StackOffset(placement.Preset, stackIndex, height);
+            y += StackOffset(placement.Preset, stackOffset);
             x = Mathf.Clamp(x, 4f, Mathf.Max(4f, screenWidth - width - 4f));
             y = Mathf.Clamp(y, 4f, Mathf.Max(4f, screenHeight - height - 4f));
 
@@ -96,12 +111,13 @@ namespace HealthAutoArrange.Plugin
             GUI.Box(new Rect(x, y, width, height), GUIContent.none, boxStyle);
             GUI.color = new Color(1f, 1f, 1f, Mathf.Clamp01(alpha));
             GUI.Label(new Rect(x, y, width, height), item.Text, labelStyle);
+            return height;
         }
 
-        private static float StackOffset(ReminderPlacementPreset placement, int index, float height)
+        private static float StackOffset(ReminderPlacementPreset placement, float offset)
         {
-            if (placement == ReminderPlacementPreset.Top) return index * (height + 8f);
-            return -index * (height + 8f);
+            if (placement == ReminderPlacementPreset.Top) return offset;
+            return -offset;
         }
 
         private static float CalculateScale(int screenHeight)

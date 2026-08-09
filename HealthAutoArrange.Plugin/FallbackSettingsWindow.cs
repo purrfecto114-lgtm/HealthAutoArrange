@@ -29,6 +29,12 @@ namespace HealthAutoArrange.Plugin
         void PreviewReminder(UiReminderModel model);
     }
 
+    /// <summary>Optional language persistence callback for the in-game GUI.</summary>
+    public interface IFallbackSettingsLanguageActions
+    {
+        void SetChineseUi(bool chinese);
+    }
+
     /// <summary>
     /// 不依赖 ConfigurationManager 的 Unity IMGUI 配置窗口。
     /// 调用方应在 OnGUI 中隔离 Draw() 抛出的 GUI 异常。
@@ -47,7 +53,7 @@ namespace HealthAutoArrange.Plugin
         private bool _open;
         private bool _hasOpened;
         private UiConfigModel _model;
-        private readonly UiTextCatalog _text;
+        private UiTextCatalog _text;
         private IReadOnlyList<StateCatalogEntry> _stateCatalog;
         private GroupSelectionEditor _selectionEditor;
         private string _stateSearch = string.Empty;
@@ -58,9 +64,19 @@ namespace HealthAutoArrange.Plugin
         private bool _showReminders;
         private bool _dirty;
         private string _stateMessage = string.Empty;
+        private readonly Dictionary<UiReminderModel, Dictionary<string, NumericTextBuffer>> _numericBuffers
+            = new Dictionary<UiReminderModel, Dictionary<string, NumericTextBuffer>>();
+
+        private sealed class NumericTextBuffer
+        {
+            public string Text;
+            public bool Editing;
+            public Action<string> Commit;
+        }
 
         public FallbackSettingsWindow(UiConfigModel model, IFallbackSettingsActions actions)
-            : this(model, actions, new List<StateCatalogEntry>())
+            : this(model, actions, new List<StateCatalogEntry>(),
+                Application.systemLanguage.ToString().StartsWith("Chinese", StringComparison.OrdinalIgnoreCase))
         {
         }
 
@@ -68,11 +84,20 @@ namespace HealthAutoArrange.Plugin
             UiConfigModel model,
             IFallbackSettingsActions actions,
             IReadOnlyList<StateCatalogEntry> stateCatalog)
+            : this(model, actions, stateCatalog,
+                Application.systemLanguage.ToString().StartsWith("Chinese", StringComparison.OrdinalIgnoreCase))
+        {
+        }
+
+        public FallbackSettingsWindow(
+            UiConfigModel model,
+            IFallbackSettingsActions actions,
+            IReadOnlyList<StateCatalogEntry> stateCatalog,
+            bool chinese)
         {
             _model = model ?? throw new ArgumentNullException(nameof(model));
             _actions = actions ?? throw new ArgumentNullException(nameof(actions));
-            _text = UiTextCatalog.ForLanguage(
-                Application.systemLanguage.ToString().StartsWith("Chinese", StringComparison.OrdinalIgnoreCase));
+            _text = UiTextCatalog.ForLanguage(chinese);
             _stateCatalog = NormalizeCatalog(stateCatalog);
             _selectionEditor = _model.CreateSelectionEditor();
         }
@@ -104,8 +129,15 @@ namespace HealthAutoArrange.Plugin
             }
             catch (Exception ex)
             {
-                _stateMessage = "Catalog refresh failed: " + ex.Message;
+                _stateMessage = _text.CatalogRefreshFailed + ex.Message;
             }
+        }
+
+        private void SetLanguage(bool chinese)
+        {
+            _text = UiTextCatalog.ForLanguage(chinese);
+            var languageActions = _actions as IFallbackSettingsLanguageActions;
+            languageActions?.SetChineseUi(chinese);
         }
 
         public void Close()
@@ -144,6 +176,13 @@ namespace HealthAutoArrange.Plugin
         private void DrawWindow(int id)
         {
             GUILayout.BeginVertical();
+            GUILayout.BeginHorizontal();
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button(new GUIContent(_text.LanguageButton, _text.LanguageHelp), GUILayout.Width(76f), GUILayout.Height(26f)))
+            {
+                SetLanguage(!_text.IsChinese);
+            }
+            GUILayout.EndHorizontal();
             _scroll = GUILayout.BeginScrollView(_scroll, GUILayout.ExpandHeight(true));
 
             DrawSectionHeader(_text.Basic, _text.EnabledHelp);
@@ -154,7 +193,7 @@ namespace HealthAutoArrange.Plugin
             var policy = DrawPolicy(_model.UnknownStatePolicy, _text);
             if (policy != _model.UnknownStatePolicy) { _model.UnknownStatePolicy = policy; _dirty = true; }
             if (_model.UnknownStatePolicy == UnknownStatePolicy.End)
-                GUILayout.Label(_text.IsChinese ? "提示：新版本/第三方未知状态会被放到最后。" : "Note: unknown game/mod moodles will be moved to the end.");
+                GUILayout.Label(_text.UnknownMovedNote);
 
             GUILayout.Space(10f);
             DrawSectionHeader(_text.Groups, _text.GroupHelp);
@@ -197,6 +236,7 @@ namespace HealthAutoArrange.Plugin
             GUILayout.BeginHorizontal();
             if (GUILayout.Button(_text.Save, GUILayout.Width(118f), GUILayout.Height(32f)))
             {
+                CommitPendingNumericFields();
                 ApplySelectionToModel();
                 SyncGroupOrderFromGroups();
                 _model.Normalize();
@@ -211,6 +251,7 @@ namespace HealthAutoArrange.Plugin
                 {
                     _model = loaded;
                     _selectionEditor = _model.CreateSelectionEditor();
+                    _numericBuffers.Clear();
                     _dirty = false;
                     _stateMessage = string.Empty;
                 }
@@ -271,10 +312,10 @@ namespace HealthAutoArrange.Plugin
         {
             for (int i = 1; i < 100; i++)
             {
-                var candidate = (_text.IsChinese ? "优先级 " : "Priority ") + i;
+                var candidate = _text.PriorityGroupPrefix + i;
                 if (!_model.Groups.Any(g => string.Equals(g.Name, candidate, StringComparison.OrdinalIgnoreCase))) return candidate;
             }
-            return _text.IsChinese ? "新分组" : "New group";
+            return _text.NewGroup;
         }
 
         private void DrawAdvancedGroupTextEditor()
@@ -313,7 +354,13 @@ namespace HealthAutoArrange.Plugin
             if (GUILayout.Button(_text.AddReminder, GUILayout.Width(124f), GUILayout.Height(28f)))
             {
                 var first = _stateCatalog.FirstOrDefault(x => x != null);
-                _model.Reminders.Add(new UiReminderModel(first != null ? first.Pattern : string.Empty, false, ReminderMode.Log, 0d));
+                _model.Reminders.Add(new UiReminderModel(
+                    first != null ? first.Pattern : string.Empty,
+                    false,
+                    ReminderMode.Log,
+                    ReminderRepeatMode.Once,
+                    ReminderRule.DefaultPeriodSeconds,
+                    ReminderRule.DefaultSendsPerPeriod));
                 _dirty = true;
             }
             if (remindersToDelete.Count > 0) { RemoveDescending(_model.Reminders, remindersToDelete); _dirty = true; }
@@ -328,7 +375,9 @@ namespace HealthAutoArrange.Plugin
                 rule.Name ?? string.Empty,
                 rule.Enabled.ToString(),
                 ((int)rule.Mode).ToString(CultureInfo.InvariantCulture),
-                rule.CooldownSeconds.ToString("R", CultureInfo.InvariantCulture),
+                ((int)rule.RepeatMode).ToString(CultureInfo.InvariantCulture),
+                rule.PeriodSeconds.ToString("R", CultureInfo.InvariantCulture),
+                rule.SendsPerPeriod.ToString(CultureInfo.InvariantCulture),
                 rule.Template ?? string.Empty,
                 ((int)rule.PresetKind).ToString(CultureInfo.InvariantCulture),
                 rule.Opacity.ToString("R", CultureInfo.InvariantCulture),
@@ -508,22 +557,42 @@ namespace HealthAutoArrange.Plugin
             GUILayout.EndHorizontal();
             GUILayout.Label(text.Mode);
             DrawReminderMode(rule, narrow, text);
+            DrawReminderFrequency(rule, narrow, text);
             GUILayout.Label(text.VisualPreset);
             DrawVisualPreset(rule, narrow, text);
             GUILayout.Label(text.Template);
             rule.Template = GUILayout.TextField(rule.Template ?? ReminderTemplateFormatter.DefaultTemplate,
                 GUILayout.ExpandWidth(true), GUILayout.Height(28f));
-            GUILayout.BeginHorizontal();
-            GUILayout.Label(text.Opacity, GUILayout.Width(90f));
-            rule.Opacity = DrawFloatField(rule.Opacity, 0f, 1f, 92f);
-            GUILayout.Label(text.Duration, GUILayout.Width(90f));
-            rule.DurationSeconds = DrawFloatField(rule.DurationSeconds, 0.1f, 600f, 100f);
-            if (GUILayout.Button(text.Preview, GUILayout.Width(88f), GUILayout.Height(28f)))
+            if (narrow)
             {
-                var previewActions = _actions as IFallbackSettingsPreviewActions;
-                if (previewActions != null) previewActions.PreviewReminder(rule);
+                GUILayout.BeginHorizontal();
+                GUILayout.Label(text.Opacity, GUILayout.Width(110f));
+                DrawFloatField(rule, "opacity", rule.Opacity, 0f, 1f, 110f, value => rule.Opacity = value);
+                GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+                GUILayout.Label(text.Duration, GUILayout.Width(110f));
+                DrawFloatField(rule, "duration", rule.DurationSeconds, 0.1f, 600f, 110f, value => rule.DurationSeconds = value);
+                GUILayout.EndHorizontal();
+                if (GUILayout.Button(text.Preview, GUILayout.ExpandWidth(true), GUILayout.Height(28f)))
+                {
+                    var previewActions = _actions as IFallbackSettingsPreviewActions;
+                    if (previewActions != null) previewActions.PreviewReminder(rule);
+                }
             }
-            GUILayout.EndHorizontal();
+            else
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Label(text.Opacity, GUILayout.Width(90f));
+                DrawFloatField(rule, "opacity", rule.Opacity, 0f, 1f, 92f, value => rule.Opacity = value);
+                GUILayout.Label(text.Duration, GUILayout.Width(90f));
+                DrawFloatField(rule, "duration", rule.DurationSeconds, 0.1f, 600f, 100f, value => rule.DurationSeconds = value);
+                if (GUILayout.Button(text.Preview, GUILayout.Width(88f), GUILayout.Height(28f)))
+                {
+                    var previewActions = _actions as IFallbackSettingsPreviewActions;
+                    if (previewActions != null) previewActions.PreviewReminder(rule);
+                }
+                GUILayout.EndHorizontal();
+            }
             DrawPlacement(rule, text, narrow);
             GUILayout.Space(6f);
             GUILayout.EndVertical();
@@ -543,7 +612,7 @@ namespace HealthAutoArrange.Plugin
             var index = entry == null ? -1 : _stateCatalog.ToList().FindIndex(x => x != null
                 && string.Equals(x.BaseId, entry.BaseId, StringComparison.OrdinalIgnoreCase));
             var label = entry == null
-                ? (_text.IsChinese ? "选择状态" : "Select state")
+                ? _text.SelectState
                 : (string.IsNullOrWhiteSpace(entry.DisplayName) ? entry.BaseId : entry.DisplayName);
 
             if (GUILayout.Button(label, narrow ? GUILayout.ExpandWidth(true) : GUILayout.Width(260f), GUILayout.Height(28f)))
@@ -560,7 +629,7 @@ namespace HealthAutoArrange.Plugin
             {
                 GUILayout.BeginHorizontal();
                 GUILayout.Label(text.ReminderMode(rule.Mode), GUILayout.ExpandWidth(true));
-                if (GUILayout.Button(text.IsChinese ? "改为日志" : "Use log", GUILayout.Width(96f), GUILayout.Height(28f)))
+                if (GUILayout.Button(text.UseLog, GUILayout.Width(96f), GUILayout.Height(28f)))
                     rule.Mode = ReminderMode.Log;
                 GUILayout.EndHorizontal();
                 return;
@@ -597,7 +666,7 @@ namespace HealthAutoArrange.Plugin
             }
         }
 
-        private static void DrawPlacement(UiReminderModel rule, UiTextCatalog text, bool narrow)
+        private void DrawPlacement(UiReminderModel rule, UiTextCatalog text, bool narrow)
         {
             var presets = Enum.GetValues(typeof(ReminderPlacementPreset));
             var current = rule.Placement == null ? ReminderPlacementPreset.Bottom : rule.Placement.Preset;
@@ -610,22 +679,41 @@ namespace HealthAutoArrange.Plugin
                 rule.Placement = PlacementFor((ReminderPlacementPreset)selected, rule.Placement);
             }
             GUILayout.EndHorizontal();
+            current = rule.Placement == null ? ReminderPlacementPreset.Bottom : rule.Placement.Preset;
             if (current != ReminderPlacementPreset.Custom) return;
 
-            rule.Placement = rule.Placement ?? ReminderPlacements.Custom(0.5f, 0.5f, 0f, 0f);
-            GUILayout.BeginHorizontal();
-            GUILayout.Label(text.NormalizedX, GUILayout.Width(90f));
-            var x = DrawFloatField(rule.Placement.NormalizedX, 0f, 1f, 90f);
-            GUILayout.Label(text.NormalizedY, GUILayout.Width(90f));
-            var y = DrawFloatField(rule.Placement.NormalizedY, 0f, 1f, 90f);
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            GUILayout.Label(text.PixelOffsetX, GUILayout.Width(90f));
-            var px = DrawFloatField(rule.Placement.PixelOffsetX, -2000f, 2000f, 90f);
-            GUILayout.Label(text.PixelOffsetY, GUILayout.Width(90f));
-            var py = DrawFloatField(rule.Placement.PixelOffsetY, -2000f, 2000f, 90f);
-            GUILayout.EndHorizontal();
-            rule.Placement = ReminderPlacements.Custom(x, y, px, py);
+            var placement = rule.Placement ?? ReminderPlacements.Custom(0.5f, 0.5f, 0f, 0f);
+            float x, y, px, py;
+            if (narrow)
+            {
+                x = DrawLabeledFloat(rule, "normalized-x", text.NormalizedX, placement.NormalizedX, 0f, 1f, 116f);
+                y = DrawLabeledFloat(rule, "normalized-y", text.NormalizedY, placement.NormalizedY, 0f, 1f, 116f);
+                px = DrawLabeledFloat(rule, "pixel-offset-x", text.PixelOffsetX, placement.PixelOffsetX, -2000f, 2000f, 116f);
+                py = DrawLabeledFloat(rule, "pixel-offset-y", text.PixelOffsetY, placement.PixelOffsetY, -2000f, 2000f, 116f);
+            }
+            else
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Label(text.NormalizedX, GUILayout.Width(100f));
+                x = placement.NormalizedX;
+                DrawFloatField(rule, "normalized-x", x, 0f, 1f, 90f,
+                    value => SetCustomPlacementComponent(rule, "normalized-x", value));
+                GUILayout.Label(text.NormalizedY, GUILayout.Width(100f));
+                y = placement.NormalizedY;
+                DrawFloatField(rule, "normalized-y", y, 0f, 1f, 90f,
+                    value => SetCustomPlacementComponent(rule, "normalized-y", value));
+                GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+                GUILayout.Label(text.PixelOffsetX, GUILayout.Width(100f));
+                px = placement.PixelOffsetX;
+                DrawFloatField(rule, "pixel-offset-x", px, -2000f, 2000f, 90f,
+                    value => SetCustomPlacementComponent(rule, "pixel-offset-x", value));
+                GUILayout.Label(text.PixelOffsetY, GUILayout.Width(100f));
+                py = placement.PixelOffsetY;
+                DrawFloatField(rule, "pixel-offset-y", py, -2000f, 2000f, 90f,
+                    value => SetCustomPlacementComponent(rule, "pixel-offset-y", value));
+                GUILayout.EndHorizontal();
+            }
         }
 
         private static ReminderPlacement PlacementFor(ReminderPlacementPreset preset, ReminderPlacement previous)
@@ -644,21 +732,189 @@ namespace HealthAutoArrange.Plugin
             }
         }
 
-        private static float DrawFloatField(float value, float min, float max, float width)
+        private void DrawFloatField(UiReminderModel rule, string field, float value, float min, float max,
+            float width, Action<float> commit = null)
         {
-            var text = GUILayout.TextField(value.ToString("0.####", CultureInfo.InvariantCulture), GUILayout.Width(width), GUILayout.Height(28f));
-            return float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
-                ? Mathf.Clamp(parsed, min, max) : value;
+            DrawNumericField(rule, field, FormatFloat(value), width, text =>
+            {
+                if (float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+                    && NumericSafety.IsFinite(parsed))
+                    commit?.Invoke(Mathf.Clamp(parsed, min, max));
+            });
         }
 
-        private static void DrawCooldown(UiReminderModel rule, bool narrow, UiTextCatalog text)
+        private float DrawLabeledFloat(UiReminderModel rule, string field, string label, float value,
+            float min, float max, float labelWidth)
         {
-            if (narrow) GUILayout.Label(text.Cooldown);
-            var cooldown = GUILayout.TextField(rule.CooldownSeconds.ToString("0.################", CultureInfo.InvariantCulture),
-                narrow ? GUILayout.ExpandWidth(true) : GUILayout.Width(100f), GUILayout.Height(28f));
-            if (double.TryParse(cooldown, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds))
-                rule.CooldownSeconds = Math.Max(0d, seconds);
-            GUILayout.Label(text.Seconds, narrow ? GUILayout.ExpandWidth(false) : GUILayout.Width(28f));
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(label, GUILayout.Width(labelWidth));
+            DrawFloatField(rule, field, value, min, max, 110f,
+                parsed => SetCustomPlacementComponent(rule, field, parsed));
+            GUILayout.EndHorizontal();
+            return GetCustomPlacementComponent(rule, field, value);
+        }
+
+        private void DrawNumericField(UiReminderModel rule, string field, string modelText, float width,
+            Action<string> commit)
+        {
+            if (!_numericBuffers.TryGetValue(rule, out var fields))
+            {
+                fields = new Dictionary<string, NumericTextBuffer>();
+                _numericBuffers[rule] = fields;
+            }
+            if (!fields.TryGetValue(field, out var buffer))
+            {
+                buffer = new NumericTextBuffer { Text = modelText };
+                fields[field] = buffer;
+            }
+            buffer.Commit = commit;
+
+            var controlName = "numeric-" + System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(rule)
+                + "-" + field;
+            var focused = GUI.GetNameOfFocusedControl();
+            if (buffer.Editing && Event.current != null && Event.current.type != EventType.Layout
+                && Event.current.type != EventType.Repaint && !string.Equals(focused, controlName, StringComparison.Ordinal))
+            {
+                commit(buffer.Text);
+                buffer.Editing = false;
+            }
+            if (!buffer.Editing) buffer.Text = modelText;
+
+            GUI.SetNextControlName(controlName);
+            var edited = GUILayout.TextField(buffer.Text ?? string.Empty, GUILayout.Width(width), GUILayout.Height(28f));
+            if (!string.Equals(edited, buffer.Text, StringComparison.Ordinal))
+            {
+                buffer.Text = edited;
+                buffer.Editing = true;
+            }
+            if (Event.current != null && Event.current.type == EventType.KeyDown
+                && (Event.current.keyCode == KeyCode.Return || Event.current.keyCode == KeyCode.KeypadEnter)
+                && string.Equals(GUI.GetNameOfFocusedControl(), controlName, StringComparison.Ordinal))
+            {
+                commit(buffer.Text);
+                buffer.Editing = false;
+                Event.current.Use();
+            }
+        }
+
+        private void CommitPendingNumericFields()
+        {
+            foreach (var fields in _numericBuffers.Values)
+            {
+                foreach (var buffer in fields.Values)
+                {
+                    if (!buffer.Editing) continue;
+                    buffer.Commit?.Invoke(buffer.Text);
+                    buffer.Editing = false;
+                }
+            }
+        }
+
+        private static string FormatFloat(float value)
+        {
+            return NumericSafety.IsFinite(value)
+                ? value.ToString("R", CultureInfo.InvariantCulture)
+                : "0";
+        }
+
+        private static void SetCustomPlacementValue(UiReminderModel rule, float x, float y, float px, float py)
+        {
+            var old = rule.Placement;
+            if (old != null && old.Preset == ReminderPlacementPreset.Custom
+                && old.NormalizedX == x && old.NormalizedY == y
+                && old.PixelOffsetX == px && old.PixelOffsetY == py) return;
+            rule.Placement = ReminderPlacements.Custom(x, y, px, py);
+        }
+
+        private static void SetCustomPlacementComponent(UiReminderModel rule, string field, float value)
+        {
+            var placement = rule.Placement ?? ReminderPlacements.Custom(0.5f, 0.5f, 0f, 0f);
+            var x = placement.NormalizedX;
+            var y = placement.NormalizedY;
+            var px = placement.PixelOffsetX;
+            var py = placement.PixelOffsetY;
+            switch (field)
+            {
+                case "normalized-x": x = value; break;
+                case "normalized-y": y = value; break;
+                case "pixel-offset-x": px = value; break;
+                case "pixel-offset-y": py = value; break;
+                default: return;
+            }
+            SetCustomPlacementValue(rule, x, y, px, py);
+        }
+
+        private static float GetCustomPlacementComponent(UiReminderModel rule, string field, float fallback)
+        {
+            var placement = rule.Placement;
+            if (placement == null) return fallback;
+            switch (field)
+            {
+                case "normalized-x": return placement.NormalizedX;
+                case "normalized-y": return placement.NormalizedY;
+                case "pixel-offset-x": return placement.PixelOffsetX;
+                case "pixel-offset-y": return placement.PixelOffsetY;
+                default: return fallback;
+            }
+        }
+
+        private void DrawReminderFrequency(UiReminderModel rule, bool narrow, UiTextCatalog text)
+        {
+            GUILayout.Space(2f);
+            GUILayout.BeginHorizontal();
+            DrawLabelWithInfoStatic(text.RepeatMode, text.RepeatModeHelp, 96f);
+            var labels = new[]
+            {
+                text.ReminderRepeatMode(ReminderRepeatMode.Once),
+                text.ReminderRepeatMode(ReminderRepeatMode.WhilePresent)
+            };
+            var selected = rule.RepeatMode == ReminderRepeatMode.WhilePresent ? 1 : 0;
+            var columns = narrow ? 1 : 2;
+            var newSelected = GUILayout.SelectionGrid(
+                selected,
+                labels,
+                columns,
+                narrow ? GUILayout.ExpandWidth(true) : GUILayout.Width(430f));
+            if (newSelected != selected)
+                rule.RepeatMode = newSelected == 1 ? ReminderRepeatMode.WhilePresent : ReminderRepeatMode.Once;
+            GUILayout.EndHorizontal();
+
+            if (rule.RepeatMode != ReminderRepeatMode.WhilePresent) return;
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(text.Period, GUILayout.Width(narrow ? 150f : 96f));
+            DrawNumericField(rule, "period", rule.PeriodSeconds.ToString("R", CultureInfo.InvariantCulture), 86f, periodText =>
+            {
+                if (double.TryParse(periodText, NumberStyles.Float, CultureInfo.InvariantCulture, out var period)
+                    && NumericSafety.IsFinite(period))
+                {
+                    var normalized = ReminderRule.NormalizePeriod(period);
+                    rule.PeriodSeconds = normalized;
+                    rule.SendsPerPeriod = ReminderRule.NormalizeSends(normalized, rule.SendsPerPeriod);
+                }
+            });
+            GUILayout.Label(text.Seconds, GUILayout.Width(36f));
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(text.SendsPerPeriod, GUILayout.Width(narrow ? 150f : 132f));
+            DrawNumericField(rule, "sends", rule.SendsPerPeriod.ToString(CultureInfo.InvariantCulture), 56f, sendsText =>
+            {
+                if (int.TryParse(sendsText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var sends))
+                    rule.SendsPerPeriod = ReminderRule.NormalizeSends(rule.PeriodSeconds, sends);
+            });
+            GUILayout.EndHorizontal();
+
+            GUILayout.Label(string.Format(
+                CultureInfo.CurrentCulture,
+                text.ApproxInterval,
+                rule.EffectiveIntervalSeconds));
+        }
+
+        private static void DrawLabelWithInfoStatic(string label, string help, float labelWidth)
+        {
+            GUILayout.Label(label, GUILayout.Width(labelWidth));
+            DrawInfoButton(help);
         }
 
         private static void RemoveDescending<T>(List<T> items, List<int> indexes)

@@ -48,7 +48,9 @@ namespace HealthAutoArrange.Tests
             var text = UiConfigTextSerializer.Serialize(model);
             Assert.Contains("Enabled = false", text);
             Assert.Contains("GroupOrder = 医务, 后排", text);
-            Assert.Contains("Reminder.bleeding.CooldownSeconds = 2.5", text);
+            Assert.Contains("Reminder.bleeding.RepeatMode = WhilePresent", text);
+            Assert.Contains("Reminder.bleeding.PeriodSeconds = 2.5", text);
+            Assert.Contains("Reminder.bleeding.SendsPerPeriod = 1", text);
 
             var restored = UiConfigTextSerializer.Parse(text);
             Assert.False(restored.Enabled);

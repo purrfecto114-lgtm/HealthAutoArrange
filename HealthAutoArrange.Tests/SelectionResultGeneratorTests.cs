@@ -12,7 +12,7 @@ namespace HealthAutoArrange.Tests
     public sealed class SelectionResultGeneratorTests
     {
         [Fact]
-        public void GenerateGroupStates_ProducesWildcardPatterns()
+        public void GenerateGroupStates_ProducesSeverityFamilyPatterns()
         {
             var editor = new GroupSelectionEditor();
             editor.AddState("Vital", "bleeding");
@@ -21,8 +21,8 @@ namespace HealthAutoArrange.Tests
 
             var states = SelectionResultGenerator.GenerateGroupStates(editor);
 
-            Assert.Equal(new[] { "bleeding*", "fracture*" }, states["Vital"]);
-            Assert.Equal(new[] { "infection*" }, states["Infection"]);
+            Assert.Equal(new[] { "bleeding#", "fracture#" }, states["Vital"]);
+            Assert.Equal(new[] { "infection#" }, states["Infection"]);
         }
 
         [Fact]
@@ -35,7 +35,7 @@ namespace HealthAutoArrange.Tests
                 editor, UnknownStatePolicy.Keep, Array.Empty<ReminderRule>());
 
             Assert.Equal(UnknownStatePolicy.Keep, config.UnknownStatePolicy);
-            Assert.Equal(new[] { "bleeding*" }, config.GroupStates["Vital"]);
+            Assert.Equal(new[] { "bleeding#" }, config.GroupStates["Vital"]);
         }
 
         [Fact]
@@ -60,7 +60,7 @@ namespace HealthAutoArrange.Tests
 
             var states = SelectionResultGenerator.GenerateGroupStates(editor);
 
-            Assert.Contains("drug2*", states["Mods"]);
+            Assert.Contains("drug2#", states["Mods"]);
         }
     }
 }

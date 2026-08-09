@@ -70,6 +70,32 @@ namespace HealthAutoArrange.Tests
             Assert.NotNull(after);
         }
 
+
+        [Fact]
+        public void SameBaseState_NewAuthoritativeSend_ReplacesActiveVisualInsteadOfStacking()
+        {
+            var presentation = new ReminderPresentation();
+            presentation.Enqueue(Msg(), Ctx(), T0, cooldownSeconds: 0, preset: TimedPreset());
+            var second = presentation.Enqueue(Msg(), Ctx("bleeding3", "Bleeding again"), T0.AddSeconds(1), cooldownSeconds: 0, preset: TimedPreset());
+
+            Assert.NotNull(second);
+            Assert.Single(presentation.Active(T0.AddSeconds(1)));
+            Assert.Equal("Bleeding again", second.Text);
+        }
+
+        [Fact]
+        public void WildcardBase_PreservesMeaningfulTrailingDigitsForVisualDedupe()
+        {
+            var presentation = new ReminderPresentation();
+            var item = presentation.Enqueue(
+                Msg("drug2*", "drug2"),
+                Ctx("drug20", "Drug 2"),
+                T0,
+                cooldownSeconds: 0);
+
+            Assert.Equal("drug2", item.BaseState);
+        }
+
         [Fact]
         public void DifferentStates_QueueIndependently()
         {
@@ -175,6 +201,38 @@ namespace HealthAutoArrange.Tests
             Assert.NotNull(second);
             Assert.Single(presentation.Active(T0.AddSeconds(1)));
             Assert.Equal("Bleeding v2", second.Text);
+        }
+
+        [Fact]
+        public void Preview_DoesNotDeleteActiveFormalReminderForSameState()
+        {
+            var presentation = new ReminderPresentation();
+            presentation.Enqueue(Msg(), Ctx(), T0, cooldownSeconds: 60);
+
+            var preview = presentation.Preview(Ctx("bleeding3", "Preview bleeding"), T0.AddSeconds(1));
+
+            Assert.NotNull(preview);
+            var active = presentation.Active(T0.AddSeconds(1));
+            Assert.Equal(2, active.Count);
+            Assert.Contains(active, i => i.BaseState == "bleeding" && i.Text == "Bleeding");
+            Assert.Contains(active, i => i.BaseState == "bleeding" && i.Text == "Preview bleeding");
+        }
+
+        [Fact]
+        public void Preview_ReplacesOldPreviewButKeepsFormalReminder()
+        {
+            var presentation = new ReminderPresentation();
+            presentation.Enqueue(Msg(), Ctx(), T0, cooldownSeconds: 60);
+            presentation.Preview(Ctx("bleeding3", "Preview v1"), T0.AddSeconds(1));
+
+            var second = presentation.Preview(Ctx("bleeding3", "Preview v2"), T0.AddSeconds(2));
+
+            Assert.NotNull(second);
+            var active = presentation.Active(T0.AddSeconds(2));
+            Assert.Equal(2, active.Count);
+            Assert.Contains(active, i => i.BaseState == "bleeding" && i.Text == "Bleeding");
+            Assert.Contains(active, i => i.BaseState == "bleeding" && i.Text == "Preview v2");
+            Assert.DoesNotContain(active, i => i.Text == "Preview v1");
         }
     }
 }

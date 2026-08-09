@@ -45,7 +45,6 @@ Group.Infection.States = infection*
         {
             var plan = PlanFromConfig(@"
 GroupOrder = Vital
-UnknownStatePolicy = End
 Group.Vital.States = Bleeding
 ");
             Assert.Equal(new[] { 0 }, plan.Apply(new[] { "Bleeding" }));
@@ -137,6 +136,38 @@ Group.Vital.States = bleeding*
             var states = new[] { "bleed", "bleeding1" };
             // "bleed" 不以 "bleeding" 开头 → 未知 → 末尾
             Assert.Equal(new[] { 1, 0 }, plan.Apply(states));
+        }
+
+        [Fact]
+        public void SeverityFamily_MatchesOnlyExactBaseOrNumericSuffix()
+        {
+            Assert.True(StateMatcher.MatchesPattern("pain#", "pain"));
+            Assert.True(StateMatcher.MatchesPattern("pain#", "pain1"));
+            Assert.True(StateMatcher.MatchesPattern("pain#", "pain42"));
+            Assert.False(StateMatcher.MatchesPattern("pain#", "painshock"));
+            Assert.False(StateMatcher.MatchesPattern("pain#", "pain2extra"));
+            Assert.False(StateMatcher.MatchesPattern("#", "123"));
+        }
+
+        [Fact]
+        public void LegacyPrefixWildcard_RemainsBroadForBackwardCompatibility()
+        {
+            Assert.True(StateMatcher.MatchesPattern("pain*", "painshock"));
+            Assert.True(StateMatcher.MatchesPattern("pain*", "pain2"));
+        }
+
+        [Fact]
+        public void PlainPatternEndingInDigit_IsExactOnly_DoesNotMatchExtendedId()
+        {
+            // 无 capture provisional 状态的 exact pattern：drug2 不能匹配 drug21。
+            Assert.True(StateMatcher.MatchesPattern("drug2", "drug2"));
+            Assert.False(StateMatcher.MatchesPattern("drug2", "drug21"));
+            Assert.False(StateMatcher.MatchesPattern("drug2", "drug2extra"));
+            Assert.False(StateMatcher.MatchesPattern("modstate123", "modstate1234"));
+
+            // 非数字结尾的旧基础名模式仍保留去除末尾数字的后备匹配。
+            Assert.True(StateMatcher.MatchesPattern("bleeding", "bleeding1"));
+            Assert.True(StateMatcher.MatchesPattern("fracture", "fracture2"));
         }
     }
 }

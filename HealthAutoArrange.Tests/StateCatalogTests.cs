@@ -65,14 +65,14 @@ namespace HealthAutoArrange.Tests
         }
 
         [Fact]
-        public void FromCaptures_PatternIsBaseIdWildcard()
+        public void FromCaptures_PatternIsBaseIdSeverityFamily()
         {
             var catalog = StateCatalog.FromCaptures(new[]
             {
                 Capture("bleeding", 1),
             });
 
-            Assert.Equal("bleeding*", catalog.Entries[0].Pattern);
+            Assert.Equal("bleeding#", catalog.Entries[0].Pattern);
         }
 
         [Fact]
@@ -93,6 +93,27 @@ namespace HealthAutoArrange.Tests
         {
             var catalog = StateCatalog.FromCaptures(Array.Empty<MoodleCaptureMetadata>());
             Assert.Empty(catalog.Entries);
+        }
+
+        [Fact]
+        public void FromCaptures_EmptyIconId_PreservesFullRuntimeIdInExactPattern()
+        {
+            // 无可靠 IconId 时不得把 modstate123 剥成 modstate，也不得猜测 severity family。
+            var catalog = StateCatalog.FromCaptures(new[]
+            {
+                new MoodleCaptureMetadata
+                {
+                    IconId = string.Empty,
+                    ExpectedRuntimeId = "modstate123",
+                    DisplayName = string.Empty,
+                    Intensity = 0,
+                    CapturedAt = T0,
+                },
+            });
+
+            var entry = Assert.Single(catalog.Entries);
+            Assert.Equal("modstate123", entry.BaseId);
+            Assert.Equal("modstate123", entry.Pattern);
         }
     }
 }

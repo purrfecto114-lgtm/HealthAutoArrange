@@ -25,10 +25,12 @@ namespace HealthAutoArrange.Core
         /// <summary>强度。</summary>
         public int Intensity { get; }
 
-        public ReminderRenderContext(string runtimeId, string displayName, string groupName, int intensity)
+        public ReminderRenderContext(string runtimeId, string displayName, string groupName, int intensity, string baseId = null)
         {
             RuntimeId = MoodleIdentity.NormalizeRuntimeId(runtimeId);
-            BaseId = MoodleIdentity.BaseId(RuntimeId);
+            BaseId = !string.IsNullOrWhiteSpace(baseId)
+                ? MoodleIdentity.NormalizeRuntimeId(baseId)
+                : MoodleIdentity.BaseId(RuntimeId);
             DisplayName = displayName ?? string.Empty;
             GroupName = groupName ?? string.Empty;
             Intensity = intensity;
@@ -60,7 +62,7 @@ namespace HealthAutoArrange.Core
 
             text = Replace(text, @"\{name\}", name);
             text = Replace(text, @"\{id\}", context.RuntimeId);
-            text = Replace(text, @"\{intensity\}", context.Intensity.ToString(CultureInfo.InvariantCulture));
+            text = Replace(text, @"\{intensity\}", context.Intensity >= 0 ? context.Intensity.ToString(CultureInfo.InvariantCulture) : "?");
             text = Replace(text, @"\{group\}", context.GroupName);
             return text;
         }

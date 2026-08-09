@@ -267,5 +267,78 @@ Reminder.CustomState.CooldownSeconds = 30
             var bleeding = result.Config.Reminders.Single(r => r.State == "Bleeding");
             Assert.False(bleeding.Enabled);
         }
+        [Fact]
+        public void Parse_NewRepeatFields_ReadsPeriodAndCount()
+        {
+            var text = @"
+Reminder.consciousness*.Enabled = true
+Reminder.consciousness*.Mode = BottomAlert
+Reminder.consciousness*.RepeatMode = WhilePresent
+Reminder.consciousness*.PeriodSeconds = 60
+Reminder.consciousness*.SendsPerPeriod = 3
+";
+            var result = ConfigTextParser.Parse(text);
+            var rule = result.Config.Reminders.Single();
+            Assert.Equal(ReminderRepeatMode.WhilePresent, rule.RepeatMode);
+            Assert.Equal(60, rule.PeriodSeconds);
+            Assert.Equal(3, rule.SendsPerPeriod);
+            Assert.Equal(20, rule.EffectiveIntervalSeconds);
+        }
+
+        [Fact]
+        public void Parse_LegacyZeroCooldown_MigratesToOnceWithWarning()
+        {
+            var result = ConfigTextParser.Parse(
+                "Reminder.consciousness*.Enabled = true\nReminder.consciousness*.CooldownSeconds = 0");
+            var rule = result.Config.Reminders.Single();
+            Assert.Equal(ReminderRepeatMode.Once, rule.RepeatMode);
+            Assert.Contains(result.Warnings, w => w.Contains("migrated") && w.Contains("spam"));
+        }
+
+        [Fact]
+        public void Parse_NumbersUseInvariantCulture()
+        {
+            var previous = System.Globalization.CultureInfo.CurrentCulture;
+            try
+            {
+                System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("de-DE");
+                var result = ConfigTextParser.Parse(
+                    "Reminder.test.RepeatMode = WhilePresent\nReminder.test.PeriodSeconds = 2.5\nReminder.test.SendsPerPeriod = 2");
+                Assert.Equal(2.5, result.Config.Reminders.Single().PeriodSeconds);
+            }
+            finally
+            {
+                System.Globalization.CultureInfo.CurrentCulture = previous;
+            }
+        }
+
+        [Fact]
+        public void Parse_PartialNewFrequencyFields_PreserveUsefulLegacyCadence()
+        {
+            var result = ConfigTextParser.Parse(@"
+Reminder.test.Enabled = true
+Reminder.test.CooldownSeconds = 60
+Reminder.test.PeriodSeconds = 30
+");
+            var rule = result.Config.Reminders.Single();
+            Assert.Equal(ReminderRepeatMode.WhilePresent, rule.RepeatMode);
+            Assert.Equal(30, rule.PeriodSeconds);
+            Assert.Equal(1, rule.SendsPerPeriod);
+        }
+
+        [Fact]
+        public void Parse_UnsafeHighFrequency_IsClampedWithWarning()
+        {
+            var result = ConfigTextParser.Parse(@"
+Reminder.test.RepeatMode = WhilePresent
+Reminder.test.PeriodSeconds = 2
+Reminder.test.SendsPerPeriod = 10
+");
+            var rule = result.Config.Reminders.Single();
+            Assert.Equal(2, rule.SendsPerPeriod);
+            Assert.Equal(1, rule.EffectiveIntervalSeconds);
+            Assert.Contains(result.Warnings, w => w.Contains("effective interval") && w.Contains("1"));
+        }
+
     }
 }

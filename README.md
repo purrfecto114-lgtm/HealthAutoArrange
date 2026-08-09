@@ -1,4 +1,4 @@
-# HealthAutoArrange
+# HealthAutoArrange 1.1.3
 
 《Casualties: Unknown》状态图标（Moodle）**客户端 UI 排序器**。设计目标是保守地重新排列游戏已经生成的图标，而不是重新实现医疗系统。
 
@@ -15,6 +15,8 @@
 - 不提供“医学优先级 = 真正病情严重度”的默认 preset。多系统状态具有上下文依赖，默认规则只提供空的 Priority 1 / Priority 2 分组，状态由玩家从运行时目录分配。
 
 ## F8 设置界面
+
+右上角提供 **`EN` / `中文` 按钮**，点击立即切换本 Mod GUI 语言，并持久化到 `BepInEx` 配置的 `[UI] Language`。`Auto` 首次会跟随系统语言；手动切换后保存为 `Chinese` 或 `English`。只翻译本 Mod 的界面、帮助与诊断反馈，不改游戏语言，也不翻译游戏/第三方 Mod 自己提供的 Moodle 显示名。
 
 主界面只保留四件事：
 
@@ -58,8 +60,28 @@
 现在：
 
 - `MoodleCaptureRegistry`：仅保存 `AddMoodle` 元数据。
-- `StateObservationRegistry`：只有扫描到真实 `Moodle` 组件才记入设置目录；会保留本次游戏会话中最近观察的基础状态，并限制总量为 256。
+- `StateObservationRegistry`：只有扫描到真实 `Moodle` 组件才记入设置目录；会保留本次游戏会话中最近观察的状态，并限制总量为 256。没有可靠捕获元数据时保留完整 runtime ID，不再猜测尾部数字一定是严重度；后续捕获恢复时会安全合并临时条目。
 - 状态条目会合并已观察的强度，并记录是否在 main/side 出现、是否曾 critical/chippedOnly。
+
+## 状态匹配模式（1.1.3）
+
+GUI 新生成的状态规则使用 `baseId#`，而不是旧版的 `baseId*`：
+
+- `pain#`：只匹配 `pain`、`pain1`、`pain2`……即“基础 ID + 纯数字严重度后缀”。
+- `pain*`：保留为旧配置/高级手工编辑的**广义前缀**，仍会匹配 `painshock`。
+- 普通无后缀规则继续保留旧版 exact / 基础名兼容语义。
+
+`#` 的目的不是宣称所有第三方状态都一定用数字严重度，而是避免 GUI 默认把共享前缀的另一个状态误当成同一状态。同时，捕获元数据 fallback 也改为同样的“明确 icon ID + 纯数字后缀”规则，第三方 `drug2` / `drug3` 之类的语义数字不会再先被截成 `drug`。旧 `*` 配置无需迁移，继续按原行为工作。
+
+## 提醒与排序开关
+
+“自动整理状态图标”现在**只控制排序写入**。状态观察和已启用的提醒规则继续运行；每条提醒仍由自己的 Enabled / 频率设置控制。这样关闭排序不会静默丢失提醒，也与 GUI 中“提醒独立于排序”的说明一致。
+
+提醒生命周期仍遵循 1.1.2 的保守语义：
+
+- 每次出现仅一次：同一连续存在 episode 只发一次；约 1 秒的短暂 UI 重建不算真正消失。
+- 状态持续期间：出现时立即发一条，之后按 `PeriodSeconds / SendsPerPeriod` 均匀发送；不补发错过的次数，最短实际间隔 1 秒。
+- 保存排序/视觉设置不会重置未变化提醒的 episode；只修改某一条提醒的触发语义时，仅重置该条。
 
 ## 默认配置
 
@@ -108,6 +130,12 @@ dotnet test HealthAutoArrange.Tests/HealthAutoArrange.Tests.csproj
 - 与 CUCoreLib：不接管其状态生成；当前 CUCoreLib 会在 `AddAllMoodles` 中注入自定义状态，并使用 `important` 区分 main/side。我们只在生成之后排序。
 - 与 QoL: Unknown：不修改它的设置注册或 Moodle 视觉效果。F8 自有 IMGUI 编辑器避免复制/强 patch v7 设置页；CUCoreLib 的原生注册表当前以 Bool/Int/Float/Dropdown/Keybind 为主，无法自然表达“运行时动态状态目录 + 分组移动 + hover 诊断”，因此本版不做两套设置源的重复同步。
 - 多人：排序和设置是客户端视觉偏好，不做网络同步。每个玩家可能拥有不同的 Unchipped 条件，因此同步 UI 顺序反而可能错误。
+
+## 1.1.3 本轮静态验证
+
+`python3 tools/static_smoke.py` 当前覆盖 **56 项源码契约**：双语按钮/持久化、提醒 episode 保留、排序关闭但提醒继续、刷新窗口元数据、语义数字 ID、`#` 严重度族、NaN/Infinity 防护、窄布局等。它不是 C# 编译器，也不是游戏内测试。
+
+本次执行环境没有可用 `dotnet/msbuild/csc/mono`，容器 DNS 也无法解析 GitHub/NuGet/.NET 下载域名，因此没有冒充“已编译/已跑 xUnit”。最终发布前仍必须在持有当前游戏 Managed DLL 的 Windows 环境执行下面的 `dotnet test` 与 `dotnet build`。
 
 ## 仍需实机验证（不能用静态测试代替）
 

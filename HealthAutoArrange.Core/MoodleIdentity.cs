@@ -39,15 +39,16 @@ namespace HealthAutoArrange.Core
         }
 
         /// <summary>
-        /// 将配置模式还原为“观察到的基础标识”。由 UI 生成的通配模式
-        /// （例如 mod123*）必须保留语义数字 123；旧的非通配配置仍按
-        /// runtime id 兼容规则去除末尾强度数字。
+        /// 将配置模式还原为“观察到的基础标识”。由 UI 生成的严重度族模式
+        /// （例如 mod123#）以及旧的广义通配模式（mod123*）都必须保留语义数字 123；
+        /// 旧的非通配配置仍按 runtime id 兼容规则去除末尾强度数字。
         /// </summary>
         public static string PatternBaseId(string pattern)
         {
             if (string.IsNullOrWhiteSpace(pattern)) return string.Empty;
             var trimmed = pattern.Trim();
-            if (trimmed.EndsWith("*", StringComparison.Ordinal))
+            if (trimmed.EndsWith("*", StringComparison.Ordinal)
+                || trimmed.EndsWith("#", StringComparison.Ordinal))
                 return NormalizeRuntimeId(trimmed.Substring(0, trimmed.Length - 1));
             return BaseId(trimmed);
         }

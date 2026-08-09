@@ -26,7 +26,7 @@ namespace HealthAutoArrange.Core
 
     /// <summary>
     /// 提醒规则基础模型：相同基础状态只能有一个规则（去重）；
-    /// 规则状态为系统生成的通配模式（baseId + "*"）；保留 cooldown。
+    /// 规则状态为系统生成的通配模式（baseId + "#"）；支持一次性或持续周期提醒。
     /// 纯 C#，无 Unity 依赖，可单元测试。
     /// </summary>
     public sealed class ReminderRuleEditor
@@ -42,7 +42,22 @@ namespace HealthAutoArrange.Core
         public ReminderRuleAddResult AddRule(
             string stateOrBase, bool enabled, ReminderMode mode, double cooldownSeconds)
         {
-            var baseId = MoodleIdentity.BaseId(stateOrBase);
+            // Legacy overload: positive cooldown maps to one send per cooldown period;
+            // zero now maps to Once, avoiding the old every-refresh spam behaviour.
+            var repeatMode = cooldownSeconds > 0d ? ReminderRepeatMode.WhilePresent : ReminderRepeatMode.Once;
+            var period = cooldownSeconds > 0d ? cooldownSeconds : ReminderRule.DefaultPeriodSeconds;
+            return AddRule(stateOrBase, enabled, mode, repeatMode, period, 1);
+        }
+
+        public ReminderRuleAddResult AddRule(
+            string stateOrBase,
+            bool enabled,
+            ReminderMode mode,
+            ReminderRepeatMode repeatMode,
+            double periodSeconds,
+            int sendsPerPeriod)
+        {
+            var baseId = MoodleIdentity.PatternBaseId(stateOrBase);
             if (baseId.Length == 0) return new ReminderRuleAddResult(false, null, "empty state");
 
             foreach (var rule in _rules)
@@ -51,22 +66,27 @@ namespace HealthAutoArrange.Core
                     return new ReminderRuleAddResult(false, rule.Name, $"rule for '{baseId}' already exists");
             }
 
-            _rules.Add(new ReminderRule(baseId, baseId + "*", enabled, mode, Math.Max(0, cooldownSeconds)));
+            _rules.Add(new ReminderRule(
+                baseId,
+                baseId + "#",
+                enabled,
+                mode,
+                repeatMode,
+                periodSeconds,
+                sendsPerPeriod));
             return new ReminderRuleAddResult(true, null, "added");
         }
 
         /// <summary>按基础状态移除规则；成功返回 true。</summary>
         public bool RemoveRule(string stateOrBase)
         {
-            var baseId = MoodleIdentity.BaseId(stateOrBase);
+            var baseId = MoodleIdentity.PatternBaseId(stateOrBase);
             return _rules.RemoveAll(r => string.Equals(BaseOf(r), baseId, StringComparison.OrdinalIgnoreCase)) > 0;
         }
 
         private static string BaseOf(ReminderRule rule)
         {
-            var state = rule.State ?? string.Empty;
-            if (state.EndsWith("*", StringComparison.Ordinal)) state = state.Substring(0, state.Length - 1);
-            return MoodleIdentity.BaseId(state);
+            return MoodleIdentity.PatternBaseId(rule.State ?? string.Empty);
         }
     }
 }

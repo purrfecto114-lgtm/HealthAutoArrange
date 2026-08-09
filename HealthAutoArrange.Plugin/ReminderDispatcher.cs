@@ -5,10 +5,12 @@ using HealthAutoArrange.Core;
 namespace HealthAutoArrange.Plugin
 {
     /// <summary>
-    /// 提醒消息分发器：
-    /// - Log：直接写日志；
-    /// - BottomAlert：仅在 PlayerCamera.main 可用时调用 DoAlert；
-    /// - HealthPanelHint：占位，仅写日志，不猜测游戏 UI。
+    /// Non-visual reminder dispatcher.
+    /// - Log: writes to BepInEx log only.
+    /// - BottomAlert: visual delivery is handled exclusively by TransparentReminderOverlay.
+    ///   We intentionally do NOT also call PlayerCamera.DoAlert; v1.1.1 did both and could show
+    ///   duplicate messages for one engine event.
+    /// - HealthPanelHint: legacy/unimplemented, log only.
     /// </summary>
     public sealed class ReminderDispatcher
     {
@@ -21,6 +23,8 @@ namespace HealthAutoArrange.Plugin
 
         public void Dispatch(ReminderMessage message)
         {
+            if (message == null) return;
+
             switch (message.Mode)
             {
                 case ReminderMode.Log:
@@ -28,35 +32,16 @@ namespace HealthAutoArrange.Plugin
                     break;
 
                 case ReminderMode.BottomAlert:
-                    TryBottomAlert(message);
+                    // Visual-only mode. Plugin.OnReminderMessage owns the transparent overlay.
                     break;
 
                 case ReminderMode.HealthPanelHint:
-                    // 占位：健康面板提示未实现，不猜测 UI，仅记录。
-                    _log.LogInfo($"[Reminder:{message.RuleName}] HealthPanelHint placeholder (not implemented): '{message.State}'");
+                    _log.LogInfo($"[Reminder:{message.RuleName}] HealthPanelHint legacy/unimplemented: '{message.State}'");
                     break;
 
                 default:
                     _log.LogInfo($"[Reminder:{message.RuleName}] unknown mode {message.Mode}: '{message.State}'");
                     break;
-            }
-        }
-
-        private void TryBottomAlert(ReminderMessage message)
-        {
-            try
-            {
-                var camera = PlayerCamera.main;
-                if (camera == null)
-                {
-                    _log.LogWarning($"[Reminder:{message.RuleName}] PlayerCamera.main unavailable, BottomAlert skipped.");
-                    return;
-                }
-                camera.DoAlert($"[HealthAutoArrange] {message.State}", true);
-            }
-            catch (Exception ex)
-            {
-                _log.LogWarning($"[Reminder:{message.RuleName}] BottomAlert failed: {ex.Message}");
             }
         }
     }

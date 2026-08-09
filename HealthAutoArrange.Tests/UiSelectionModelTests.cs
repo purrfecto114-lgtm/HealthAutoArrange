@@ -21,8 +21,41 @@ namespace HealthAutoArrange.Tests
             model.ApplySelectionEditor(editor);
 
             Assert.Equal(new[] { "Vital", "Infection" }, model.GroupOrder);
+            // 旧 * 模式在无关保存时保真；新目录分配生成 #。
             Assert.Equal("bleeding*", model.Groups[0].StatesText);
-            Assert.Equal("poisoned*", model.Groups[1].StatesText);
+            Assert.Equal("poisoned#", model.Groups[1].StatesText);
+        }
+
+        [Fact]
+        public void SelectionEditorSave_PreservesLegacyWildcardPattern()
+        {
+            var model = new UiConfigModel();
+            model.GroupOrder.Add("Vital");
+            model.Groups.Add(new UiGroupModel("Vital", "pain*"));
+
+            var editor = model.CreateSelectionEditor();
+            editor.AddState("Infection", "poisoned");
+            model.ApplySelectionEditor(editor);
+
+            // 无关的修改/保存不得把旧 pain* 改写为 pain#。
+            Assert.Equal("pain*", model.Groups[0].StatesText);
+            Assert.Equal("poisoned#", model.Groups[1].StatesText);
+        }
+
+        [Fact]
+        public void SelectionEditorSave_PreservesExactPatternWithSemanticDigits()
+        {
+            var model = new UiConfigModel();
+            model.GroupOrder.Add("Vital");
+            model.Groups.Add(new UiGroupModel("Vital", "bleeding3"));
+
+            var editor = model.CreateSelectionEditor();
+            editor.AddState("Infection", "poisoned");
+            model.ApplySelectionEditor(editor);
+
+            // 无关的修改/保存不得把 exact bleeding3 改写为 bleeding#。
+            Assert.Equal("bleeding3", model.Groups[0].StatesText);
+            Assert.Equal("poisoned#", model.Groups[1].StatesText);
         }
 
         [Fact]

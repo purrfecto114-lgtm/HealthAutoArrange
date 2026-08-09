@@ -65,5 +65,26 @@ namespace HealthAutoArrange.Tests
             Assert.Equal(ReminderVisualPresetKind.CompactBottomLeft, ReminderVisualPreset.FromKind(ReminderVisualPresetKind.CompactBottomLeft).Kind);
             Assert.Equal(ReminderVisualPresetKind.SubtleBottom, ReminderVisualPreset.FromKind(ReminderVisualPresetKind.SubtleBottom).Kind);
         }
+
+
+        [Fact]
+        public void NonFiniteVisualValues_FallBackToFiniteDefaults()
+        {
+            var preset = new ReminderVisualPreset(
+                ReminderVisualPresetKind.SubtleBottom,
+                ReminderPlacements.Bottom(),
+                float.NaN,
+                float.PositiveInfinity,
+                float.NaN,
+                float.NegativeInfinity,
+                16,
+                float.NaN);
+
+            Assert.True(NumericSafety.IsFinite(preset.Opacity));
+            Assert.True(NumericSafety.IsFinite(preset.DurationSeconds));
+            Assert.True(NumericSafety.IsFinite(preset.FadeInSeconds));
+            Assert.True(NumericSafety.IsFinite(preset.FadeOutSeconds));
+            Assert.True(NumericSafety.IsFinite(preset.MaxWidth));
+        }
     }
 }

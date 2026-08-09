@@ -18,11 +18,12 @@ namespace HealthAutoArrange.Plugin
     /// BepInEx 的 com.healthautoarrange.plugin.cfg 仅保留默认模板与热键，用于兼容。
     /// 补丁目标缺失或任何初始化失败时仅记录警告，不阻塞游戏启动。
     /// </summary>
-    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.1.1")]
+    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.1.3")]
     public class Plugin : BaseUnityPlugin,
         IFallbackSettingsActions,
         IFallbackSettingsStateActions,
-        IFallbackSettingsPreviewActions
+        IFallbackSettingsPreviewActions,
+        IFallbackSettingsLanguageActions
     {
         internal static ManualLogSource PluginLog;
         internal static UnityUiAdapter Adapter;
@@ -40,6 +41,7 @@ namespace HealthAutoArrange.Plugin
         private string _rulesPath;
         private ConfigEntry<KeyCode> _settingsKey;
         private ConfigEntry<KeyCode> _debugDumpKey;
+        private ConfigEntry<string> _uiLanguage;
 
         private void Awake()
         {
@@ -52,6 +54,9 @@ namespace HealthAutoArrange.Plugin
                 "Key to open/close the settings window.");
             _debugDumpKey = Config.Bind("Debug", "DebugDumpKey", KeyCode.F9,
                 "Key to dump current Moodle diagnostics to the log.");
+            _uiLanguage = Config.Bind("UI", "Language", "Auto",
+                "Settings GUI language: Auto, Chinese, or English. The in-game button writes Chinese/English here.");
+            var chineseUi = ResolveChineseUiLanguage();
 
             // 2. 读取 BepInEx 配置（默认模板 + 兼容解析）
             var parseResult = LoadConfig();
@@ -62,7 +67,7 @@ namespace HealthAutoArrange.Plugin
 
             // 3. 构建适配器：排序核心 + 提醒引擎 + 分发器 + 透明提醒展示
             _presentation = new ReminderPresentation();
-            _overlay = new TransparentReminderOverlay(_presentation);
+            _overlay = new TransparentReminderOverlay(_presentation, chineseUi);
             var dispatcher = new ReminderDispatcher(Logger);
             var reminders = new ReminderEngine(parseResult.Config.Reminders);
             Adapter = new UnityUiAdapter(
@@ -79,7 +84,7 @@ namespace HealthAutoArrange.Plugin
             ApplyModel(_uiModel);
 
             // 5. F8 设置窗口（不依赖 ConfigurationManager）；初始状态目录来自当前捕获。
-            SettingsWindow = new FallbackSettingsWindow(_uiModel, this, RefreshStateCatalog());
+            SettingsWindow = new FallbackSettingsWindow(_uiModel, this, RefreshStateCatalog(), chineseUi);
 
             // 6. Harmony 补丁：目标缺失时降级，不抛异常
             _harmony = new Harmony("com.healthautoarrange.plugin");
@@ -303,11 +308,12 @@ namespace HealthAutoArrange.Plugin
         {
             try
             {
-                Logger.LogInfo("HealthAutoArrange diagnostics written to LogOutput.log");
+                var text = _overlay != null ? _overlay.Text.DiagnosticsWritten : "HealthAutoArrange diagnostics written to LogOutput.log";
+                Logger.LogInfo(text);
                 var camera = PlayerCamera.main;
                 if (camera != null)
                 {
-                    camera.DoAlert("HealthAutoArrange diagnostics written to LogOutput.log", false);
+                    camera.DoAlert(text, false);
                 }
             }
             catch (Exception ex)
@@ -358,11 +364,12 @@ namespace HealthAutoArrange.Plugin
                 var displayName = entry != null && !string.IsNullOrWhiteSpace(entry.DisplayName)
                     ? entry.DisplayName : fallback;
                 var intensity = entry != null && entry.Intensities != null && entry.Intensities.Count > 0
-                    ? entry.Intensities[entry.Intensities.Count - 1] : 0;
+                    ? entry.Intensities[entry.Intensities.Count - 1] : -1;
                 var runtimeId = entry != null && !string.IsNullOrWhiteSpace(entry.LastRuntimeId)
                     ? entry.LastRuntimeId : model.Name;
+                var baseId = entry != null ? entry.BaseId : MoodleIdentity.PatternBaseId(model.Name);
 
-                var context = new ReminderRenderContext(runtimeId, displayName, string.Empty, intensity);
+                var context = new ReminderRenderContext(runtimeId, displayName, string.Empty, intensity, baseId);
                 _presentation?.Preview(context, DateTimeOffset.UtcNow,
                     ReminderVisualPresetBuilder.Build(model), model.Template);
             }
@@ -373,26 +380,59 @@ namespace HealthAutoArrange.Plugin
         }
 
         /// <summary>
-        /// 正式提醒回调（适配器在提醒引擎触发时调用）：
-        /// 从当前 UI 模型查找视觉配置（预设/模板/冷却），入队透明提醒展示。
-        /// 与 ReminderEngine 构成双层去重，避免 0.5s 刷新周期内重复显示。
+        /// Formal reminder callback. ReminderEngine is the single source of truth for send cadence.
+        /// Only BottomAlert produces the transparent on-screen overlay; Log remains log-only and the
+        /// legacy HealthPanelHint stays non-visual. Presentation no longer applies a second long
+        /// cooldown, so a state that disappears and legitimately reappears can alert immediately.
         /// </summary>
         private void OnReminderMessage(ReminderMessage message, ReminderRenderContext context)
         {
             try
             {
+                if (message == null || message.Mode != ReminderMode.BottomAlert) return;
+
                 var model = _uiModel?.Reminders?.FirstOrDefault(r => r != null
                     && string.Equals(r.Name, message.RuleName, StringComparison.OrdinalIgnoreCase));
                 var preset = model != null ? ReminderVisualPresetBuilder.Build(model) : null;
                 var template = model != null && !string.IsNullOrWhiteSpace(model.Template)
                     ? model.Template : null;
-                var cooldown = model != null ? model.CooldownSeconds : 0d;
-                _presentation?.Enqueue(message, context, DateTimeOffset.UtcNow, cooldown, preset, template);
+
+                // No schedule-level dedupe here: the engine already emitted one authoritative event.
+                _presentation?.Enqueue(message, context, DateTimeOffset.UtcNow, 0d, preset, template);
             }
             catch (Exception ex)
             {
                 Logger.LogWarning($"HealthAutoArrange: OnReminderMessage failed: {ex.Message}");
             }
+        }
+
+        public void SetChineseUi(bool chinese)
+        {
+            try
+            {
+                if (_uiLanguage != null)
+                {
+                    _uiLanguage.Value = chinese ? "Chinese" : "English";
+                    Config.Save();
+                }
+                _overlay?.SetLanguage(chinese);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning($"HealthAutoArrange: failed to persist GUI language: {ex.Message}");
+            }
+        }
+
+        private bool ResolveChineseUiLanguage()
+        {
+            var value = (_uiLanguage?.Value ?? "Auto").Trim();
+            if (value.Equals("Chinese", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("zh", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("zh-CN", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("中文", StringComparison.OrdinalIgnoreCase)) return true;
+            if (value.Equals("English", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("en", StringComparison.OrdinalIgnoreCase)) return false;
+            return Application.systemLanguage.ToString().StartsWith("Chinese", StringComparison.OrdinalIgnoreCase);
         }
 
         // ---- 配置加载 ----
@@ -430,9 +470,9 @@ namespace HealthAutoArrange.Plugin
         }
 
         /// <summary>
-        /// 应用模型：更新 ArrangeConfig、重建 ReminderEngine（经 Adapter.Reconfigure），
-        /// 将 model.Enabled 传入运行时（禁用时不排序、不触发提醒），
-        /// 保持当前 manager 与捕获注册表。
+        /// 应用模型：更新 ArrangeConfig，并经 Adapter.Reconfigure 增量更新提醒规则。
+        /// model.Enabled 只控制状态图标排序；提醒规则按各自 Enabled 独立运行。
+        /// 保持当前 manager、观察快照与捕获注册表。
         /// </summary>
         private void ApplyModel(UiConfigModel model)
         {

@@ -41,5 +41,16 @@ namespace HealthAutoArrange.Tests
             Assert.Equal(ReminderPlacementPreset.Center, ReminderPlacements.Center().Preset);
             Assert.Equal(ReminderPlacementPreset.BottomLeft, ReminderPlacements.BottomLeft().Preset);
         }
+
+
+        [Fact]
+        public void Custom_NonFiniteValues_FallBackToSafeFiniteCoordinates()
+        {
+            var p = ReminderPlacements.Custom(float.NaN, float.PositiveInfinity, float.NaN, float.NegativeInfinity);
+            Assert.Equal(0.5f, p.NormalizedX, 3);
+            Assert.Equal(0.5f, p.NormalizedY, 3);
+            Assert.Equal(0f, p.PixelOffsetX, 3);
+            Assert.Equal(0f, p.PixelOffsetY, 3);
+        }
     }
 }

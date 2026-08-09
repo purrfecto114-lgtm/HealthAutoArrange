@@ -56,6 +56,9 @@ namespace HealthAutoArrange.Core
         private readonly List<MoodleCaptureMetadata> _recent = new List<MoodleCaptureMetadata>();
         private int _sequence;
 
+        /// <summary>Most recent monotonic capture sequence.</summary>
+        public int LatestSequence => _sequence;
+
         /// <summary>
         /// 记录一次 AddMoodle 调用。manager 为调用方实例（MoodleManager）。
         /// </summary>
@@ -95,12 +98,21 @@ namespace HealthAutoArrange.Core
         /// </summary>
         public MoodleCaptureMetadata Resolve(string runtimeId, object manager = null)
         {
+            return Resolve(runtimeId, manager, 0);
+        }
+
+        /// <summary>
+        /// Resolves metadata only from captures newer than the supplied refresh-boundary sequence.
+        /// This prevents an old AddMoodle call from donating stale name/severity data to a later UI node.
+        /// </summary>
+        public MoodleCaptureMetadata Resolve(string runtimeId, object manager, int minSequenceExclusive)
+        {
             var normalized = MoodleIdentity.NormalizeRuntimeId(runtimeId);
-            var baseId = MoodleIdentity.BaseId(normalized);
 
             for (var i = _recent.Count - 1; i >= 0; i--)
             {
                 var item = _recent[i];
+                if (item.Sequence <= minSequenceExclusive) continue;
                 if (manager != null && !ReferenceEquals(item.Manager, manager)) continue;
                 if (item.ExpectedRuntimeId == normalized) return item;
             }
@@ -108,11 +120,33 @@ namespace HealthAutoArrange.Core
             for (var i = _recent.Count - 1; i >= 0; i--)
             {
                 var item = _recent[i];
+                if (item.Sequence <= minSequenceExclusive) continue;
                 if (manager != null && !ReferenceEquals(item.Manager, manager)) continue;
-                if (MoodleIdentity.BaseId(item.IconId) == baseId) return item;
+
+                // Conservative fallback: an icon/base ID may be followed by severity digits,
+                // but digits that are already part of the icon ID are semantic and must be kept.
+                // This avoids collapsing third-party IDs such as drug2 and drug3 into "drug".
+                var iconId = MoodleIdentity.NormalizeRuntimeId(item.IconId);
+                if (MatchesSeverityFamily(iconId, normalized)) return item;
             }
 
             return null;
+        }
+
+
+        private static bool MatchesSeverityFamily(string baseId, string runtimeId)
+        {
+            if (string.IsNullOrEmpty(baseId) || string.IsNullOrEmpty(runtimeId)) return false;
+            if (string.Equals(baseId, runtimeId, StringComparison.OrdinalIgnoreCase)) return true;
+            if (!runtimeId.StartsWith(baseId, StringComparison.OrdinalIgnoreCase)) return false;
+
+            var suffix = runtimeId.Substring(baseId.Length);
+            if (suffix.Length == 0) return true;
+            for (var i = 0; i < suffix.Length; i++)
+            {
+                if (!char.IsDigit(suffix[i])) return false;
+            }
+            return true;
         }
 
         /// <summary>清空注册表（刷新周期开始前调用）。</summary>

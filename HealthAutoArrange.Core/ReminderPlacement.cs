@@ -64,15 +64,10 @@ namespace HealthAutoArrange.Core
             float pixelOffsetY)
         {
             Preset = preset;
-            NormalizedX = Clamp(normalizedX, MinNormalized, MaxNormalized);
-            NormalizedY = Clamp(normalizedY, MinNormalized, MaxNormalized);
-            PixelOffsetX = Clamp(pixelOffsetX, MinPixelOffset, MaxPixelOffset);
-            PixelOffsetY = Clamp(pixelOffsetY, MinPixelOffset, MaxPixelOffset);
-        }
-
-        private static float Clamp(float value, float min, float max)
-        {
-            return Math.Max(min, Math.Min(max, value));
+            NormalizedX = NumericSafety.ClampFinite(normalizedX, MinNormalized, MaxNormalized, 0.5f);
+            NormalizedY = NumericSafety.ClampFinite(normalizedY, MinNormalized, MaxNormalized, 0.5f);
+            PixelOffsetX = NumericSafety.ClampFinite(pixelOffsetX, MinPixelOffset, MaxPixelOffset, 0f);
+            PixelOffsetY = NumericSafety.ClampFinite(pixelOffsetY, MinPixelOffset, MaxPixelOffset, 0f);
         }
     }
 

@@ -7,7 +7,7 @@ namespace HealthAutoArrange.Tests
 {
     /// <summary>
     /// 提醒引擎对基础状态模式（bleeding*）的匹配行为：
-    /// 状态持续更新不能重复产生首次提醒；消失再出现才允许再次提醒；保留 cooldown。
+    /// 状态持续更新不能重复产生首次提醒；消失再出现才允许再次提醒；兼容旧 cooldown 配置。
     /// </summary>
     public sealed class ReminderEnginePatternTests
     {

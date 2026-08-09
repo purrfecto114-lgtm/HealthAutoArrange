@@ -32,6 +32,13 @@ namespace HealthAutoArrange.Plugin
         private MoodleManager _manager;
         private ArrangeConfig _config;
         private string _lastSignature = string.Empty;
+        private readonly HashSet<string> _lastPresentStates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private List<MoodleVisual> _lastVisualSnapshot = new List<MoodleVisual>();
+        private bool _hasPresentSnapshot;
+        private float _nextReminderTickRealtime;
+        private int _captureFloorSequence;
+        private readonly Dictionary<int, int> _captureBoundaryByManager = new Dictionary<int, int>();
+        private const float ReminderTickSeconds = 0.25f;
 
         public UnityUiAdapter(
             SortPlan plan,
@@ -79,9 +86,18 @@ namespace HealthAutoArrange.Plugin
             if (config == null) throw new ArgumentNullException(nameof(config));
             _config = config;
             _plan = config.CreateSortPlan();
-            _reminders = new ReminderEngine(config.Reminders);
+            // Preserve cadence/episode state for reminder rules whose trigger semantics did not
+            // change. Saving an unrelated sort/visual setting must not make a continuous Once rule
+            // look like a new appearance.
+            _reminders.Reconfigure(config.Reminders);
             _runtime.Enabled = enabled;
             _lastSignature = string.Empty;
+            _nextReminderTickRealtime = 0f;
+
+            // Keep the last confirmed presence snapshot and request a fresh scan. The master UI
+            // toggle controls sorting only; reminder rules remain independent as stated in the GUI.
+            // This also avoids the historical save->retrigger reminder bug.
+            if (_manager != null) _scheduler.OnGameRefreshCompleted();
         }
 
         /// <summary>
@@ -125,23 +141,52 @@ namespace HealthAutoArrange.Plugin
         {
             if (manager == null) return;
             _manager = manager;
-            if (!_runtime.Enabled) return;
 
-            // 刷新边界：签名缓存失效，确保新重建对象立即获得排序。
-            _lastSignature = string.Empty;
+            // AddMoodle calls for this refresh have already happened before this postfix. Move the
+            // metadata window forward without clearing the registry in a prefix: CUCoreLib itself
+            // injects custom moodles from an AddAllMoodles prefix, so a competing prefix clear would
+            // be Harmony-order sensitive and could erase valid third-party captures.
+            var managerKey = manager.GetInstanceID();
+            if (!_captureBoundaryByManager.TryGetValue(managerKey, out _captureFloorSequence))
+                _captureFloorSequence = 0;
+            _captureBoundaryByManager[managerKey] = _captures.LatestSequence;
+            if (_captureBoundaryByManager.Count > 16)
+            {
+                // Managers are normally singular. If scenes/mods churn them, avoid an unbounded
+                // bookkeeping dictionary; stale keys are only a metadata optimization.
+                var keep = _captureBoundaryByManager[managerKey];
+                _captureBoundaryByManager.Clear();
+                _captureBoundaryByManager[managerKey] = keep;
+            }
+
+            // 刷新边界：即使关闭排序，也继续观察 Moodle 并驱动已启用的提醒；
+            // 只有实际 UI 重排受主开关控制。
+            if (_runtime.Enabled) _lastSignature = string.Empty;
 
             _scheduler.OnGameRefreshCompleted();
         }
 
         /// <summary>
-        /// 每帧调用：仅处理上一帧推迟的挂起任务（重试）。
-        /// 不每帧强制写位置；禁用时不排序、不触发提醒（诊断与配置 UI 不受影响）。
+        /// 每帧调用：处理上一帧推迟的挂起任务，并低频推进提醒计时。
+        /// 不每帧扫描/强制写位置；排序禁用时仍保持状态观察与已启用提醒。
         /// </summary>
         public void Update()
         {
-            if (!_runtime.Enabled) return;
-            if (!_scheduler.TryDeferred()) return;
-            ProcessRefresh();
+            if (_scheduler.TryDeferred())
+            {
+                ProcessRefresh();
+            }
+
+            // Periodic reminder cadence must not depend on how often the game chooses to rebuild
+            // Moodle UI. Reuse the last confirmed snapshot and tick cheaply at 4 Hz.
+            // If the game is fully paused, do not emit new reminders.
+            if (_hasPresentSnapshot
+                && Time.timeScale > 0f
+                && Time.realtimeSinceStartup >= _nextReminderTickRealtime)
+            {
+                RunRemindersSnapshot();
+                _nextReminderTickRealtime = Time.realtimeSinceStartup + ReminderTickSeconds;
+            }
         }
 
         /// <summary>
@@ -168,9 +213,14 @@ namespace HealthAutoArrange.Plugin
                 return;
             }
 
-            RunReminders(visuals);
+            UpdatePresentSnapshot(visuals);
+            if (Time.timeScale > 0f)
+            {
+                RunRemindersSnapshot();
+            }
+            _nextReminderTickRealtime = Time.realtimeSinceStartup + ReminderTickSeconds;
 
-            if (visuals.Count < 2) return;
+            if (!_runtime.Enabled || visuals.Count < 2) return;
 
             try
             {
@@ -207,11 +257,14 @@ namespace HealthAutoArrange.Plugin
                 {
                     var capture = v.Capture;
                     var pos = v.RectTransform != null ? v.RectTransform.anchoredPosition.ToString() : "n/a";
+                    var diagnosticBaseId = capture != null && !string.IsNullOrWhiteSpace(capture.IconId)
+                        ? MoodleIdentity.NormalizeRuntimeId(capture.IconId)
+                        : MoodleIdentity.NormalizeRuntimeId(v.RuntimeId);
                     _log?.Invoke("id=" + v.RuntimeId
-                        + " base=" + MoodleIdentity.BaseId(v.RuntimeId)
+                        + " base=" + diagnosticBaseId
                         + " name='" + (capture != null ? capture.DisplayName : string.Empty) + "'"
                         + " row=" + (v.IsSide ? "side" : "main")
-                        + " intensity=" + (capture != null ? capture.Intensity : MoodleIdentity.ParseTrailingIntensity(v.RuntimeId, 0))
+                        + " intensity=" + (capture != null ? capture.Intensity.ToString() : "unknown")
                         + " critical=" + (capture != null ? capture.Critical : false)
                         + " seq=" + (capture != null ? capture.Sequence : -1)
                         + " sibling=" + v.SiblingIndex
@@ -256,7 +309,7 @@ namespace HealthAutoArrange.Plugin
                     if (string.IsNullOrWhiteSpace(runtimeId)) runtimeId = child.name;
                     var rect = child as RectTransform;
 
-                    var capture = _captures.Resolve(runtimeId, manager);
+                    var capture = _captures.Resolve(runtimeId, manager, _captureFloorSequence);
                     result.Add(new MoodleVisual
                     {
                         Component = child,
@@ -428,22 +481,38 @@ namespace HealthAutoArrange.Plugin
         /// 除原有分发器外，还以 ReminderMessage + ReminderRenderContext 回调宿主
         /// （Plugin 用于透明提醒展示）。
         /// </summary>
-        private void RunReminders(List<MoodleVisual> visuals)
+        private void UpdatePresentSnapshot(List<MoodleVisual> visuals)
+        {
+            _lastPresentStates.Clear();
+            _lastVisualSnapshot = visuals == null
+                ? new List<MoodleVisual>()
+                : new List<MoodleVisual>(visuals);
+            foreach (var v in _lastVisualSnapshot)
+            {
+                if (!string.IsNullOrEmpty(v.RuntimeId)) _lastPresentStates.Add(v.RuntimeId);
+            }
+            _hasPresentSnapshot = true;
+        }
+
+        /// <summary>
+        /// Tick the reminder state machine from the last UI-confirmed Moodle snapshot.
+        /// The engine itself owns once/repeat cadence and never burst-catches up missed slots.
+        /// </summary>
+        private void RunRemindersSnapshot()
         {
             try
             {
-                var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var v in visuals)
-                {
-                    if (!string.IsNullOrEmpty(v.RuntimeId)) present.Add(v.RuntimeId);
-                }
-                var messages = _reminders.Update(present, DateTimeOffset.Now);
+                if (!_hasPresentSnapshot) return;
+                var messages = _reminders.Update(_lastPresentStates, DateTimeOffset.UtcNow);
                 foreach (var message in messages)
                 {
                     _dispatcher.Dispatch(message);
                     if (_onReminder != null)
                     {
-                        _onReminder(message, BuildContext(message, visuals));
+                        // Reuse the last UI-confirmed snapshot rather than rescanning the Unity
+                        // hierarchy for every reminder emission. Refresh hooks are the source of
+                        // truth for presence; timer ticks only advance cadence between them.
+                        _onReminder(message, BuildContext(message, _lastVisualSnapshot));
                     }
                 }
             }
@@ -463,15 +532,19 @@ namespace HealthAutoArrange.Plugin
             var runtimeId = visual != null ? visual.RuntimeId : message.State;
             var capture = visual != null ? visual.Capture : null;
             var groupName = _config != null ? _config.ResolveGroupName(runtimeId) : string.Empty;
+            var stableBaseId = capture != null && !string.IsNullOrWhiteSpace(capture.IconId)
+                ? MoodleIdentity.NormalizeRuntimeId(capture.IconId)
+                : MoodleIdentity.PatternBaseId(message.State);
             return new ReminderRenderContext(
                 runtimeId,
                 capture != null ? capture.DisplayName : string.Empty,
                 groupName,
-                capture != null ? capture.Intensity : MoodleIdentity.ParseTrailingIntensity(runtimeId, 0));
+                capture != null ? capture.Intensity : -1,
+                stableBaseId);
         }
 
         /// <summary>
-        /// 规则状态模式匹配（与 ReminderEngine 一致）：exact / prefix 通配符 / 去末尾数字基础名。
+        /// 规则状态模式匹配（与 ReminderEngine 一致）：exact / 严重度族 # / legacy prefix * / 去末尾数字基础名。
         /// </summary>
         private static bool RuleMatches(string pattern, string state)
         {

@@ -11,6 +11,8 @@
 - [ ] Test opening the health panel and hovering the moodle bar while side moodles appear/disappear.
 - [ ] Test a state whose severity changes rapidly; verify no flicker/jitter and stable equal-priority ordering.
 - [ ] Test an unknown third-party moodle; default Keep must not unexpectedly demote it.
+- [ ] Test a semantic-numeric third-party ID; capture fallback and `#` family matching must not merge sibling IDs.
+- [ ] Disable sorting while leaving a reminder enabled; reminder must continue and no UI ordering writes may occur.
 - [ ] Test scene/menu/player rebuilds; stale capture metadata must not leak across managers.
 
 ## P1 — compatibility matrix
@@ -23,6 +25,9 @@
 
 ## P1 — GUI polish after real screenshots
 
+- [ ] Verify `EN / 中文` button switches all Mod-owned GUI text and survives restart.
+- [ ] Verify English long labels do not clip at the narrow-layout breakpoint.
+- [ ] Confirm game/third-party Moodle display names intentionally remain game-provided after GUI language switching.
 - [ ] Capture F8 window at 1080p and the user's actual UI scale.
 - [ ] Verify the right-side `i` hover card never runs off-screen or blocks the row being configured.
 - [ ] Check Chinese/English text truncation and button widths.

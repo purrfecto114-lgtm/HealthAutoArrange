@@ -52,3 +52,12 @@ Sources:
 - No attempt is made to merge main and side rows.
 - No promise is made that anchored-position reordering is valid for every future UI layout.
 - No claim is made that the F8 IMGUI editor visually matches the native v7 settings menu.
+
+
+## 1.1.3 follow-up — localization and runtime semantics
+
+- CUCoreLib `MoodleRegistry.AddMoodle` currently documents `important` as main-row vs side-row selection, a stable queue key for a logical Moodle whose severity changes, and a default hold time of 0.75 seconds. It tells callers to queue while the condition remains active. Consequence: repeated queue/AddMoodle activity must not be treated as repeated medical events.
+- CUCoreLib applies queued custom moodles by temporarily assigning `manager.sideMoodles = !important` and then calling vanilla `manager.AddMoodle(...)`.
+- CUCoreLib's `Moodle.Start` animation patch strips trailing digits from `Moodle.type` to recover an icon key. This supports numeric severity suffixes in the current ecosystem, but does not prove that every third-party numeric suffix is severity. 1.1.3 therefore uses the stricter GUI-generated `#` severity-family matcher while keeping legacy `*`.
+- The Scav Prototype Wiki says side moodles only appear in the health panel or while the Moodle bar is hovered. The mod therefore stays UI-observation based and keeps a short absence grace rather than reading hidden physiology to manufacture states.
+- Current community precedent exists for bilingual standalone panels. Quick Medical Automation explicitly supports Chinese/English and has changelog fixes for mixed-language headers after switching; Casualty Vitals supports manual/Auto language selection.

@@ -34,7 +34,13 @@ namespace HealthAutoArrange.Core
                     model.Groups.Add(new UiGroupModel(group.Key, string.Join(", ", group.Value)));
             }
             foreach (var rule in config.Reminders)
-                model.Reminders.Add(new UiReminderModel(rule.Name, rule.Enabled, rule.Mode, rule.CooldownSeconds));
+                model.Reminders.Add(new UiReminderModel(
+                    rule.Name,
+                    rule.Enabled,
+                    rule.Mode,
+                    rule.RepeatMode,
+                    rule.PeriodSeconds,
+                    rule.SendsPerPeriod));
             return model;
         }
 
@@ -48,7 +54,14 @@ namespace HealthAutoArrange.Core
                 GroupOrder.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
                 groups,
                 UnknownStatePolicy,
-                Reminders.Select(x => new ReminderRule(x.Name, x.Name, x.Enabled, x.Mode, Math.Max(0, x.CooldownSeconds))).ToList());
+                Reminders.Select(x => new ReminderRule(
+                    x.Name,
+                    x.Name,
+                    x.Enabled,
+                    x.Mode,
+                    x.RepeatMode,
+                    x.PeriodSeconds,
+                    x.SendsPerPeriod)).ToList());
         }
 
         /// <summary>将当前已生成的分组模式转换为状态选择编辑器。</summary>
@@ -70,21 +83,56 @@ namespace HealthAutoArrange.Core
             return editor;
         }
 
-        /// <summary>将状态选择编辑器结果写回 UI 分组模型，统一生成 baseId* 模式。</summary>
+        /// <summary>将状态选择编辑器结果写回 UI 分组模型。</summary>
         public void ApplySelectionEditor(GroupSelectionEditor editor)
         {
             if (editor == null) throw new ArgumentNullException(nameof(editor));
             editor.Normalize();
+
+            // 保真映射：(分组名, 基础 id) → 原有模式文本。旧配置的 '*' 通配与 exact 模式
+            // 在无关修改/保存时必须原样保留，不能被静默改写为 GUI 新生成的 '#'。
+            var originalByBase = new Dictionary<string, Dictionary<string, string>>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var group in Groups)
+            {
+                if (group == null || string.IsNullOrWhiteSpace(group.Name)) continue;
+                var byBase = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var state in Split(group.StatesText))
+                {
+                    var baseId = MoodleIdentity.PatternBaseId(state);
+                    if (baseId.Length > 0 && !byBase.ContainsKey(baseId))
+                        byBase[baseId] = state;
+                }
+                originalByBase[group.Name.Trim()] = byBase;
+            }
+
             Groups.Clear();
             GroupOrder = new List<string>();
-            var generated = SelectionResultGenerator.GenerateGroupStates(editor);
             foreach (var group in editor.Groups)
             {
                 var name = (group.Name ?? string.Empty).Trim();
                 if (name.Length == 0) continue;
                 GroupOrder.Add(name);
-                Groups.Add(new UiGroupModel(name,
-                    generated.TryGetValue(name, out var patterns) ? string.Join(", ", patterns) : string.Empty));
+
+                var patterns = new List<string>();
+                originalByBase.TryGetValue(name, out var byBase);
+                foreach (var state in group.States)
+                {
+                    var baseId = MoodleIdentity.NormalizeRuntimeId(state);
+                    if (baseId.Length == 0) continue;
+                    // 已有模式保留原样；新目录分配才生成严重度族 "#" 模式。
+                    if (byBase != null
+                        && byBase.TryGetValue(baseId, out var original)
+                        && original.Length > 0)
+                    {
+                        patterns.Add(original);
+                    }
+                    else
+                    {
+                        patterns.Add(baseId + "#");
+                    }
+                }
+                Groups.Add(new UiGroupModel(name, string.Join(", ", patterns)));
             }
         }
 
@@ -125,9 +173,10 @@ namespace HealthAutoArrange.Core
                 var name = (reminder.Name ?? string.Empty).Trim();
                 if (name.Length == 0 || !reminderSeen.Add(name)) continue;
                 reminder.Name = name;
-                reminder.CooldownSeconds = Math.Max(0, reminder.CooldownSeconds);
-                reminder.Opacity = Math.Max(0f, Math.Min(1f, reminder.Opacity));
-                reminder.DurationSeconds = Math.Max(0.1f, Math.Min(600f, reminder.DurationSeconds));
+                reminder.PeriodSeconds = ReminderRule.NormalizePeriod(reminder.PeriodSeconds);
+                reminder.SendsPerPeriod = ReminderRule.NormalizeSends(reminder.PeriodSeconds, reminder.SendsPerPeriod);
+                reminder.Opacity = NumericSafety.ClampFinite(reminder.Opacity, 0f, 1f, 0.55f);
+                reminder.DurationSeconds = NumericSafety.ClampFinite(reminder.DurationSeconds, 0.1f, 600f, 5f);
                 if (reminder.Placement == null)
                     reminder.Placement = ReminderVisualPreset.FromKind(reminder.PresetKind).Placement;
                 reminders.Add(reminder);
@@ -159,22 +208,60 @@ namespace HealthAutoArrange.Core
         public string Name { get; set; }
         public bool Enabled { get; set; }
         public ReminderMode Mode { get; set; }
-        public double CooldownSeconds { get; set; }
+        public ReminderRepeatMode RepeatMode { get; set; }
+        public double PeriodSeconds { get; set; }
+        public int SendsPerPeriod { get; set; }
         public string Template { get; set; }
         public ReminderVisualPresetKind PresetKind { get; set; }
         public float Opacity { get; set; }
         public float DurationSeconds { get; set; }
         public ReminderPlacement Placement { get; set; }
 
+        /// <summary>
+        /// Legacy v1.1.1 constructor. Positive cooldown becomes one send per cooldown period;
+        /// zero becomes Once to avoid the historical every-refresh spam behaviour.
+        /// </summary>
         public UiReminderModel(string name, bool enabled, ReminderMode mode, double cooldownSeconds)
+            : this(
+                name,
+                enabled,
+                mode,
+                cooldownSeconds > 0d ? ReminderRepeatMode.WhilePresent : ReminderRepeatMode.Once,
+                cooldownSeconds > 0d ? cooldownSeconds : ReminderRule.DefaultPeriodSeconds,
+                ReminderRule.DefaultSendsPerPeriod)
+        {
+        }
+
+        public UiReminderModel(
+            string name,
+            bool enabled,
+            ReminderMode mode,
+            ReminderRepeatMode repeatMode,
+            double periodSeconds,
+            int sendsPerPeriod)
         {
             Name = name ?? string.Empty;
             Enabled = enabled;
             Mode = mode;
-            CooldownSeconds = Math.Max(0, cooldownSeconds);
+            RepeatMode = repeatMode;
+            PeriodSeconds = ReminderRule.NormalizePeriod(periodSeconds);
+            SendsPerPeriod = ReminderRule.NormalizeSends(PeriodSeconds, sendsPerPeriod);
             Template = ReminderTemplateFormatter.DefaultTemplate;
             ApplyPreset(ReminderVisualPresetKind.SubtleBottom);
         }
+
+        public double EffectiveIntervalSeconds => RepeatMode == ReminderRepeatMode.WhilePresent
+            ? PeriodSeconds / SendsPerPeriod
+            : double.PositiveInfinity;
+
+        /// <summary>
+        /// Legacy v1.1.1 compatibility view used by older callers/tests. A repeating rule reports
+        /// its effective interval; Once reports 0. New code should use RepeatMode/PeriodSeconds/
+        /// SendsPerPeriod instead.
+        /// </summary>
+        public double CooldownSeconds => RepeatMode == ReminderRepeatMode.WhilePresent
+            ? EffectiveIntervalSeconds
+            : 0d;
 
         public void ApplyPreset(ReminderVisualPresetKind kind)
         {
@@ -205,8 +292,11 @@ namespace HealthAutoArrange.Core
             {
                 lines.Add("Reminder." + (rule.Name ?? string.Empty).Trim() + ".Enabled = " + rule.Enabled.ToString().ToLowerInvariant());
                 lines.Add("Reminder." + (rule.Name ?? string.Empty).Trim() + ".Mode = " + rule.Mode);
-                lines.Add("Reminder." + (rule.Name ?? string.Empty).Trim() + ".CooldownSeconds = "
-                    + rule.CooldownSeconds.ToString("0.################", CultureInfo.InvariantCulture));
+                lines.Add("Reminder." + (rule.Name ?? string.Empty).Trim() + ".RepeatMode = " + rule.RepeatMode);
+                lines.Add("Reminder." + (rule.Name ?? string.Empty).Trim() + ".PeriodSeconds = "
+                    + rule.PeriodSeconds.ToString("0.################", CultureInfo.InvariantCulture));
+                lines.Add("Reminder." + (rule.Name ?? string.Empty).Trim() + ".SendsPerPeriod = "
+                    + rule.SendsPerPeriod.ToString(CultureInfo.InvariantCulture));
                 lines.Add("Reminder." + (rule.Name ?? string.Empty).Trim() + ".Template = " + (rule.Template ?? ReminderTemplateFormatter.DefaultTemplate));
                 lines.Add("Reminder." + (rule.Name ?? string.Empty).Trim() + ".Preset = " + rule.PresetKind);
                 lines.Add("Reminder." + (rule.Name ?? string.Empty).Trim() + ".Opacity = " + rule.Opacity.ToString("0.####", CultureInfo.InvariantCulture));
@@ -247,17 +337,18 @@ namespace HealthAutoArrange.Core
                 if (values.TryGetValue(prefix + "Template", out var template)) reminder.Template = template;
                 if (values.TryGetValue(prefix + "Preset", out var preset)
                     && Enum.TryParse(preset, true, out ReminderVisualPresetKind presetKind))
-                    reminder.PresetKind = presetKind;
+                    reminder.ApplyPreset(presetKind);
                 if (values.TryGetValue(prefix + "Opacity", out var opacity)
                     && float.TryParse(opacity, NumberStyles.Float, CultureInfo.InvariantCulture, out var opacityValue))
-                    reminder.Opacity = opacityValue;
+                    reminder.Opacity = NumericSafety.IsFinite(opacityValue) ? opacityValue : reminder.Opacity;
                 if (values.TryGetValue(prefix + "DurationSeconds", out var duration)
                     && float.TryParse(duration, NumberStyles.Float, CultureInfo.InvariantCulture, out var durationValue))
-                    reminder.DurationSeconds = durationValue;
+                    reminder.DurationSeconds = NumericSafety.IsFinite(durationValue) ? durationValue : reminder.DurationSeconds;
                 var placement = reminder.Placement;
                 var placementPreset = placement.Preset;
-                if (values.TryGetValue(prefix + "PlacementPreset", out var placementText))
-                    Enum.TryParse(placementText, true, out placementPreset);
+                if (values.TryGetValue(prefix + "PlacementPreset", out var placementText)
+                    && Enum.TryParse(placementText, true, out ReminderPlacementPreset parsedPlacementPreset))
+                    placementPreset = parsedPlacementPreset;
                 var x = ReadFloat(values, prefix + "NormalizedX", placement.NormalizedX);
                 var y = ReadFloat(values, prefix + "NormalizedY", placement.NormalizedY);
                 var px = ReadFloat(values, prefix + "PixelOffsetX", placement.PixelOffsetX);
@@ -269,9 +360,9 @@ namespace HealthAutoArrange.Core
 
         private static float ReadFloat(Dictionary<string, string> values, string key, float fallback)
         {
-            return values.TryGetValue(key, out var text)
-                && float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
-                ? value : fallback;
+            if (!values.TryGetValue(key, out var text)) return fallback;
+            if (!float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value)) return fallback;
+            return NumericSafety.IsFinite(value) ? value : fallback;
         }
     }
 }

@@ -155,6 +155,18 @@ namespace HealthAutoArrange.Tests
         }
 
         [Fact]
+        public void Resolve_FallbackPreservesSemanticDigitsInIconId()
+        {
+            var registry = new MoodleCaptureRegistry();
+            registry.Capture("m", 1, "drug2", "Drug 2", "", false, false, false);
+            registry.Capture("m", 1, "drug3", "Drug 3", "", false, false, false);
+
+            Assert.Equal("Drug 2", registry.Resolve("drug21").DisplayName);
+            Assert.Equal("Drug 3", registry.Resolve("drug31").DisplayName);
+            Assert.Null(registry.Resolve("drug22extra"));
+        }
+
+        [Fact]
         public void Capture_RecordsSideRow()
         {
             var registry = new MoodleCaptureRegistry();
@@ -175,6 +187,24 @@ namespace HealthAutoArrange.Tests
 
             Assert.Equal("A", registry.Resolve("bleeding1", managerA).DisplayName);
             Assert.Equal("B", registry.Resolve("bleeding1", managerB).DisplayName);
+        }
+
+
+        [Fact]
+        public void ResolveSince_RejectsMetadataFromPreviousRefreshWindow()
+        {
+            var registry = new MoodleCaptureRegistry();
+            var manager = new object();
+            registry.Capture(manager, 1, "bleeding", "Old bleeding", "", false, false, false);
+            var boundary = registry.LatestSequence;
+
+            Assert.Null(registry.Resolve("bleeding1", manager, boundary));
+
+            registry.Capture(manager, 2, "bleeding", "Fresh bleeding", "", true, false, false);
+            var fresh = registry.Resolve("bleeding2", manager, boundary);
+            Assert.NotNull(fresh);
+            Assert.Equal("Fresh bleeding", fresh.DisplayName);
+            Assert.True(fresh.Critical);
         }
 
     }
@@ -315,6 +345,7 @@ Group.Vital.States = bleeding, fracture
         public void PatternBaseId_PreservesSemanticDigitsForGeneratedWildcard()
         {
             Assert.Equal("modstate123", MoodleIdentity.PatternBaseId("modstate123*"));
+            Assert.Equal("modstate123", MoodleIdentity.PatternBaseId("modstate123#"));
             Assert.Equal("bleeding", MoodleIdentity.PatternBaseId("bleeding3"));
         }
     }

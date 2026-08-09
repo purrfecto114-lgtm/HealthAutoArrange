@@ -5,7 +5,7 @@ using Xunit;
 namespace HealthAutoArrange.Tests
 {
     /// <summary>
-    /// 提醒规则基础模型去重：相同基础状态只能有一个规则；保留 cooldown。
+    /// 提醒规则基础模型去重：相同基础状态只能有一个规则；兼容旧 cooldown 调用。
     /// </summary>
     public sealed class ReminderRuleEditorTests
     {
@@ -18,7 +18,7 @@ namespace HealthAutoArrange.Tests
 
             Assert.False(conflict.Added);
             Assert.Single(editor.Rules);
-            Assert.Equal("bleeding*", editor.Rules[0].State);
+            Assert.Equal("bleeding#", editor.Rules[0].State);
         }
 
         [Fact]
@@ -41,12 +41,12 @@ namespace HealthAutoArrange.Tests
         }
 
         [Fact]
-        public void AddRule_GeneratesWildcardPattern()
+        public void AddRule_GeneratesSeverityFamilyPattern()
         {
             var editor = new ReminderRuleEditor();
             editor.AddRule("bleeding", true, ReminderMode.Log, 30);
 
-            Assert.Equal("bleeding*", editor.Rules[0].State);
+            Assert.Equal("bleeding#", editor.Rules[0].State);
             Assert.Equal("bleeding", editor.Rules[0].Name);
         }
     }

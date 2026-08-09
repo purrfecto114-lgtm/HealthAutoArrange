@@ -59,12 +59,16 @@ namespace HealthAutoArrange.Core
             if (captures == null) throw new ArgumentNullException(nameof(captures));
 
             var groups = new Dictionary<string, List<MoodleCaptureMetadata>>(StringComparer.OrdinalIgnoreCase);
+            // 记录每个 baseId 分组是否由可靠 IconId 派生；无可靠 IconId 时不得猜测
+            // severity family，须保留完整 ExpectedRuntimeId 并生成 exact pattern。
+            var reliableBaseIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var capture in captures)
             {
                 if (capture == null) continue;
-                var baseId = !string.IsNullOrWhiteSpace(capture.IconId)
+                var hasReliableIconId = !string.IsNullOrWhiteSpace(capture.IconId);
+                var baseId = hasReliableIconId
                     ? MoodleIdentity.NormalizeRuntimeId(capture.IconId)
-                    : MoodleIdentity.BaseId(capture.ExpectedRuntimeId);
+                    : MoodleIdentity.NormalizeRuntimeId(capture.ExpectedRuntimeId);
                 if (baseId.Length == 0) continue;
                 if (!groups.TryGetValue(baseId, out var list))
                 {
@@ -72,6 +76,7 @@ namespace HealthAutoArrange.Core
                     groups[baseId] = list;
                 }
                 list.Add(capture);
+                if (hasReliableIconId) reliableBaseIds.Add(baseId);
             }
 
             var entries = new List<StateCatalogEntry>(groups.Count);
@@ -107,8 +112,12 @@ namespace HealthAutoArrange.Core
                 }
                 intensities.Sort();
 
+                // 可靠 IconId 派生基础名时使用 severity family（"base#"）；
+                // 无可靠 IconId 时保留完整 runtime id 的 exact pattern（与
+                // StateObservationRegistry 的 provisional exact 策略一致，不加 "#"）。
+                var pattern = reliableBaseIds.Contains(baseId) ? baseId + "#" : baseId;
                 entries.Add(new StateCatalogEntry(
-                    baseId, displayName, baseId + "*", intensities,
+                    baseId, displayName, pattern, intensities,
                     latest.CapturedAt, latest.ExpectedRuntimeId,
                     main, side, critical, chippedOnly));
             }

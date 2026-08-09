@@ -92,17 +92,12 @@ namespace HealthAutoArrange.Core
         {
             Kind = kind;
             Placement = placement ?? throw new ArgumentNullException(nameof(placement));
-            Opacity = Clamp(opacity, MinOpacity, MaxOpacity);
-            DurationSeconds = Clamp(durationSeconds, MinDurationSeconds, MaxDurationSeconds);
-            FadeInSeconds = Clamp(fadeInSeconds, MinFadeSeconds, MaxFadeSeconds);
-            FadeOutSeconds = Clamp(fadeOutSeconds, MinFadeSeconds, MaxFadeSeconds);
-            FontSize = (int)Clamp(fontSize, MinFontSize, MaxFontSize);
-            MaxWidth = Clamp(maxWidth, MinMaxWidth, MaxMaxWidth);
-        }
-
-        private static float Clamp(float value, float min, float max)
-        {
-            return Math.Max(min, Math.Min(max, value));
+            Opacity = NumericSafety.ClampFinite(opacity, MinOpacity, MaxOpacity, 0.55f);
+            DurationSeconds = NumericSafety.ClampFinite(durationSeconds, MinDurationSeconds, MaxDurationSeconds, 5f);
+            FadeInSeconds = NumericSafety.ClampFinite(fadeInSeconds, MinFadeSeconds, MaxFadeSeconds, 0.3f);
+            FadeOutSeconds = NumericSafety.ClampFinite(fadeOutSeconds, MinFadeSeconds, MaxFadeSeconds, 0.6f);
+            FontSize = (int)Math.Max(MinFontSize, Math.Min(MaxFontSize, fontSize));
+            MaxWidth = NumericSafety.ClampFinite(maxWidth, MinMaxWidth, MaxMaxWidth, 480f);
         }
 
         /// <summary>默认预设：SubtleBottom。</summary>

@@ -15,7 +15,7 @@ namespace HealthAutoArrange.Tests
             Assert.Equal("排序分组", text.Groups);
             Assert.Equal("状态提醒（实验性）", text.ReminderRules);
             Assert.Equal("保持原位（推荐）", text.UnknownPolicy(UnknownStatePolicy.Keep));
-            Assert.Contains("不改变伤病判定", text.EnabledHelp);
+            Assert.Contains("不会改变伤病判定", text.EnabledHelp);
             Assert.Contains("实际", text.CatalogHelp);
         }
 
@@ -33,6 +33,20 @@ namespace HealthAutoArrange.Tests
         {
             Assert.Equal("状态提醒预览", UiTextCatalog.ForLanguage(true).PreviewFallback);
             Assert.Equal("State reminder preview", UiTextCatalog.ForLanguage(false).PreviewFallback);
+        }
+
+
+        [Fact]
+        public void LanguageButtonShowsTargetLanguageAndHelpIsLocalized()
+        {
+            var zh = UiTextCatalog.ForLanguage(true);
+            var en = UiTextCatalog.ForLanguage(false);
+            Assert.Equal("EN", zh.LanguageButton);
+            Assert.Equal("中文", en.LanguageButton);
+            Assert.Contains("不会修改游戏语言", zh.LanguageHelp);
+            Assert.Contains("does not change the game language", en.LanguageHelp);
+            Assert.Equal("选择状态", zh.SelectState);
+            Assert.Equal("Select state", en.SelectState);
         }
     }
 }

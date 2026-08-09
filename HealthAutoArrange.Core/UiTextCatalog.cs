@@ -24,8 +24,11 @@ namespace HealthAutoArrange.Core
         public string Name => _chinese ? "名称" : "Name";
         public string States => _chinese ? "状态 ID / 模式" : "State IDs / patterns";
         public string Mode => _chinese ? "输出方式" : "Output";
-        public string Cooldown => _chinese ? "冷却" : "Cooldown";
+        public string RepeatMode => _chinese ? "发送频率" : "Frequency";
+        public string Period => _chinese ? "周期" : "Period";
+        public string SendsPerPeriod => _chinese ? "每周期最多发送" : "Max sends / period";
         public string Seconds => _chinese ? "秒" : "sec";
+        public string ApproxInterval => _chinese ? "约每 {0:0.##} 秒一次" : "About every {0:0.##} sec";
         public string AddGroup => _chinese ? "添加分组" : "Add group";
         public string AddReminder => _chinese ? "添加提醒" : "Add reminder";
         public string Delete => _chinese ? "删除" : "Delete";
@@ -61,10 +64,19 @@ namespace HealthAutoArrange.Core
         public string PixelOffsetY => _chinese ? "像素偏移 Y" : "Pixel offset Y";
         public string PreviewFallback => _chinese ? "状态提醒预览" : "State reminder preview";
         public string LegacyUnsupported => _chinese ? "旧设置：当前未实现" : "Legacy setting: not implemented";
+        public string LanguageButton => _chinese ? "EN" : "中文";
+        public string LanguageHelp => _chinese ? "切换此 Mod 的设置界面语言；不会修改游戏语言或状态名称。" : "Switch this mod's settings language. This does not change the game language or Moodle names.";
+        public string UnknownMovedNote => _chinese ? "提示：新版本/第三方未知状态会被放到最后。" : "Note: unknown game/mod moodles will be moved to the end.";
+        public string SelectState => _chinese ? "选择状态" : "Select state";
+        public string UseLog => _chinese ? "改为日志" : "Use log";
+        public string CatalogRefreshFailed => _chinese ? "状态目录刷新失败：" : "Catalog refresh failed: ";
+        public string DiagnosticsWritten => _chinese ? "HealthAutoArrange 诊断已写入 LogOutput.log" : "HealthAutoArrange diagnostics written to LogOutput.log";
+        public string PriorityGroupPrefix => _chinese ? "优先级 " : "Priority ";
+        public string NewGroup => _chinese ? "新分组" : "New group";
 
         public string EnabledHelp => _chinese
-            ? "只调整游戏本轮已经创建的 Moodle 图标顺序；不改变伤病判定、严重度、脑芯片可见性或主/侧状态栏规则。"
-            : "Only reorders Moodle UI nodes already created by the game. It does not change medical simulation, severity, chip visibility, or main/side row rules.";
+            ? "只控制游戏已创建 Moodle 图标的排序；不会改变伤病判定、严重度、脑芯片可见性或主/侧状态栏规则。状态提醒有各自的开关，关闭排序不会静默关闭提醒。"
+            : "Controls ordering of Moodle UI nodes already created by the game. It does not change medical simulation, severity, chip visibility, or main/side row rules. Reminder rules have their own switches, so disabling sorting does not silently disable reminders.";
 
         public string UnknownPolicyHelp => _chinese
             ? "“保持原位”最保守：新版本或第三方 Mod 的未知状态不会被擅自降到末尾。“移到末尾”只适合你已覆盖绝大多数状态的配置。"
@@ -83,8 +95,12 @@ namespace HealthAutoArrange.Core
             : "Advanced options are mostly for diagnostics, compatibility and reminders. Sorting normally needs none of these; custom positions/reminders are more sensitive to resolution and game updates.";
 
         public string ReminderHelp => _chinese
-            ? "提醒是额外功能，不参与排序。优先使用日志或底部透明提示；“健康面板提示”旧模式当前没有可靠实现，因此不再作为可选模式展示。"
-            : "Reminders are independent from sorting. Prefer log or transparent bottom alerts. The legacy Health Panel Hint mode has no reliable implementation and is no longer offered as a selectable mode.";
+            ? "提醒是额外功能，不参与排序。默认每次状态出现只提醒一次；持续提醒把发送机会均匀分布在周期内，漏过的时点不会补发连刷，且最短实际间隔为 1 秒。透明提示由本 Mod 自己绘制，不再同时调用游戏原生 DoAlert。"
+            : "Reminders are independent from sorting. Default is once per appearance. Repeating reminders spread send opportunities evenly across the period, never burst-replay missed slots, and enforce a 1-second minimum interval. Transparent alerts are rendered only by this mod and no longer also call the game's native DoAlert.";
+
+        public string RepeatModeHelp => _chinese
+            ? "“仅一次”：同一轮状态连续存在期间只发一次；约 1 秒内的 UI 短暂重建不算消失。“持续期间”：出现时立即发一条（计入本周期），之后按 周期÷最多次数 均匀发送；最短间隔 1 秒，暂停或漏帧错过的次数不会补发。"
+            : "Once: one message for the same continuous episode; a brief ~1s UI rebuild does not count as disappearance. While present: sends immediately (counting as this period's first send), then at Period / max-sends spacing; minimum interval is 1 second and missed sends are never replayed.";
 
         public string TargetGroupHelp => _chinese
             ? "点右侧按钮循环选择目标分组，再用“加入/移动”分配状态。修改只在“保存并应用”后写入规则文件。"
@@ -93,7 +109,7 @@ namespace HealthAutoArrange.Core
         public string StateTechnicalHelp(StateCatalogEntry entry)
         {
             if (entry == null) return string.Empty;
-            var intensities = entry.Intensities == null ? string.Empty : string.Join(", ", entry.Intensities);
+            var intensities = entry.Intensities == null || entry.Intensities.Count == 0 ? (_chinese ? "未知" : "unknown") : string.Join(", ", entry.Intensities);
             var rows = entry.SeenInMainRow && entry.SeenInSideRow
                 ? (_chinese ? "主排 + side 排" : "main + side")
                 : entry.SeenInSideRow ? "side" : (_chinese ? "主排" : "main");
@@ -101,9 +117,15 @@ namespace HealthAutoArrange.Core
                 + "\n" + (_chinese ? "最近 runtime ID: " : "Last runtime ID: ") + entry.LastRuntimeId
                 + "\n" + (_chinese ? "观察到的强度: " : "Observed intensities: ") + intensities
                 + "\n" + (_chinese ? "观察到的行: " : "Observed rows: ") + rows
-                + "\n" + (_chinese ? "曾标记 critical: " : "Ever critical: ") + entry.EverCritical
-                + "\n" + (_chinese ? "曾使用 chippedOnly: " : "Ever used chippedOnly: ") + entry.UsesChippedOnly
+                + "\n" + (_chinese ? "曾标记 critical: " : "Ever critical: ") + LocalBool(entry.EverCritical)
+                + "\n" + (_chinese ? "曾使用 chippedOnly: " : "Ever used chippedOnly: ") + LocalBool(entry.UsesChippedOnly)
                 + "\n" + (_chinese ? "最近观察: " : "Last observed: ") + entry.LastSeenAt.ToLocalTime().ToString("HH:mm:ss");
+        }
+
+        private string LocalBool(bool value)
+        {
+            if (_chinese) return value ? "是" : "否";
+            return value ? "yes" : "no";
         }
 
         public string UnknownPolicy(UnknownStatePolicy policy)
@@ -113,6 +135,16 @@ namespace HealthAutoArrange.Core
                 case global::HealthAutoArrange.Core.UnknownStatePolicy.End: return _chinese ? "移到末尾" : "Move to end";
                 case global::HealthAutoArrange.Core.UnknownStatePolicy.Keep: return _chinese ? "保持原位（推荐）" : "Keep position (recommended)";
                 default: return policy.ToString();
+            }
+        }
+
+
+        public string ReminderRepeatMode(ReminderRepeatMode mode)
+        {
+            switch (mode)
+            {
+                case global::HealthAutoArrange.Core.ReminderRepeatMode.WhilePresent: return _chinese ? "状态持续期间" : "While present";
+                default: return _chinese ? "每次出现仅一次（推荐）" : "Once per appearance (recommended)";
             }
         }
 

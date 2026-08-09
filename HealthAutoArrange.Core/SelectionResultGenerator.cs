@@ -5,7 +5,7 @@ namespace HealthAutoArrange.Core
 {
     /// <summary>
     /// 选择结果生成：由选中的基础状态生成 Group.&lt;name&gt;.States 需要的模式。
-    /// 模式由系统生成（baseId + "*"），非玩家手写；未知状态策略保持 End/Keep。
+    /// 模式由系统生成（baseId + "#"），非玩家手写；未知状态策略保持 End/Keep。
     /// 纯 C#，无 Unity 依赖，可单元测试。
     /// </summary>
     public static class SelectionResultGenerator
@@ -28,7 +28,7 @@ namespace HealthAutoArrange.Core
                 foreach (var state in group.States)
                 {
                     var baseId = MoodleIdentity.NormalizeRuntimeId(state);
-                    if (baseId.Length > 0) patterns.Add(baseId + "*");
+                    if (baseId.Length > 0) patterns.Add(baseId + "#");
                 }
                 result[name] = patterns;
             }

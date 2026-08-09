@@ -1,12 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 
 namespace HealthAutoArrange.Core
 {
-    /// <summary>
-    /// 解析结果：配置模型与解析过程中产生的警告。
-    /// </summary>
+    /// <summary>Parse result: config plus non-fatal diagnostics.</summary>
     public sealed class ConfigParseResult
     {
         public ArrangeConfig Config { get; }
@@ -20,9 +19,10 @@ namespace HealthAutoArrange.Core
     }
 
     /// <summary>
-    /// 从键值对文本解析配置。支持 BepInEx 风格配置键：
-    /// GroupOrder、Group.&lt;name&gt;.States、UnknownStatePolicy、Reminder.&lt;rule&gt;.{Enabled|Mode|CooldownSeconds}。
-    /// 空白项忽略、重复项首次生效、非法值回退到默认并记录警告。
+    /// Parses BepInEx-style key/value text.
+    /// Reminder v1.1.2 keys:
+    /// Reminder.&lt;rule&gt;.{Enabled|Mode|RepeatMode|PeriodSeconds|SendsPerPeriod}.
+    /// Legacy Reminder.&lt;rule&gt;.CooldownSeconds remains readable for v1.1.1 migration.
     /// </summary>
     public static class ConfigTextParser
     {
@@ -35,7 +35,7 @@ namespace HealthAutoArrange.Core
 
             var warnings = new List<string>();
             var groupOrder = new List<string>();
-            var groupStates = new Dictionary<string, List<string>>();
+            var groupStates = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             var policy = UnknownStatePolicy.Keep;
             var rules = new Dictionary<string, RuleBuilder>(StringComparer.OrdinalIgnoreCase);
 
@@ -86,18 +86,58 @@ namespace HealthAutoArrange.Core
                 {
                     ParseReminderKey(key, value, rules, warnings);
                 }
-                // 其他未知键：忽略
             }
 
             var reminders = new List<ReminderRule>(rules.Count);
             foreach (var rb in rules.Values)
             {
+                if (string.IsNullOrWhiteSpace(rb.Name))
+                {
+                    warnings.Add("Reminder with empty name ignored.");
+                    continue;
+                }
+
                 if (!rb.ModeValid)
                 {
                     rb.Enabled = false;
                     warnings.Add($"Reminder.{rb.Name}: invalid Mode '{rb.InvalidModeValue}', rule disabled.");
                 }
-                reminders.Add(new ReminderRule(rb.Name, rb.Name, rb.Enabled, rb.Mode, rb.CooldownSeconds));
+
+                var repeatMode = rb.RepeatMode;
+                var period = rb.PeriodSeconds;
+                var sends = rb.SendsPerPeriod;
+
+                // v1.1.1 migration. Treat each new frequency field independently so a hand-edited
+                // partial 1.1.2 config does not accidentally discard a valid legacy cooldown.
+                if (rb.LegacyCooldownSeconds.HasValue)
+                {
+                    var legacy = rb.LegacyCooldownSeconds.Value;
+                    if (!rb.HasRepeatModeField)
+                        repeatMode = legacy > 0d ? ReminderRepeatMode.WhilePresent : ReminderRepeatMode.Once;
+                    if (!rb.HasPeriodField && legacy > 0d)
+                        period = legacy;
+                    if (!rb.HasSendsField)
+                        sends = ReminderRule.DefaultSendsPerPeriod;
+
+                    if (legacy <= 0d && !rb.HasRepeatModeField)
+                        warnings.Add($"Reminder.{rb.Name}.CooldownSeconds=0 migrated to RepeatMode=Once to prevent every-refresh spam.");
+                }
+
+                var normalizedPeriod = ReminderRule.NormalizePeriod(period);
+                var normalizedSends = ReminderRule.NormalizeSends(normalizedPeriod, sends);
+                if (normalizedPeriod != period)
+                    warnings.Add($"Reminder.{rb.Name}.PeriodSeconds normalized to {normalizedPeriod.ToString(CultureInfo.InvariantCulture)}.");
+                if (normalizedSends != sends)
+                    warnings.Add($"Reminder.{rb.Name}.SendsPerPeriod normalized to {normalizedSends} so the effective interval is at least {ReminderRule.MinimumEffectiveIntervalSeconds.ToString(CultureInfo.InvariantCulture)} second.");
+
+                reminders.Add(new ReminderRule(
+                    rb.Name,
+                    rb.Name,
+                    rb.Enabled,
+                    rb.Mode,
+                    repeatMode,
+                    normalizedPeriod,
+                    normalizedSends));
             }
 
             var config = new ArrangeConfig(
@@ -126,7 +166,10 @@ namespace HealthAutoArrange.Core
         {
             const string enabledSuffix = ".Enabled";
             const string modeSuffix = ".Mode";
-            const string cooldownSuffix = ".CooldownSeconds";
+            const string repeatModeSuffix = ".RepeatMode";
+            const string periodSuffix = ".PeriodSeconds";
+            const string sendsSuffix = ".SendsPerPeriod";
+            const string legacyCooldownSuffix = ".CooldownSeconds";
 
             if (key.EndsWith(enabledSuffix, StringComparison.OrdinalIgnoreCase))
             {
@@ -152,33 +195,82 @@ namespace HealthAutoArrange.Core
                     rb.InvalidModeValue = value;
                 }
             }
-            else if (key.EndsWith(cooldownSuffix, StringComparison.OrdinalIgnoreCase))
+            else if (key.EndsWith(repeatModeSuffix, StringComparison.OrdinalIgnoreCase))
             {
-                var name = RuleNameOf(key, cooldownSuffix);
+                var name = RuleNameOf(key, repeatModeSuffix);
                 var rb = GetOrAdd(rules, name);
-                if (double.TryParse(value, out var d))
+                rb.HasRepeatModeField = true;
+                if (Enum.TryParse(value, true, out ReminderRepeatMode repeatMode))
+                    rb.RepeatMode = repeatMode;
+                else
                 {
-                    if (d < 0)
-                    {
-                        rb.CooldownSeconds = 0;
-                        warnings.Add($"Reminder.{name}.CooldownSeconds: negative value '{value}' clamped to 0.");
-                    }
-                    else
-                    {
-                        rb.CooldownSeconds = d;
-                    }
+                    rb.RepeatMode = ReminderRepeatMode.Once;
+                    warnings.Add($"Reminder.{name}.RepeatMode: invalid value '{value}', using Once.");
+                }
+            }
+            else if (key.EndsWith(periodSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                var name = RuleNameOf(key, periodSuffix);
+                var rb = GetOrAdd(rules, name);
+                rb.HasPeriodField = true;
+                if (TryParseInvariantDouble(value, out var d))
+                {
+                    var normalized = ReminderRule.NormalizePeriod(d);
+                    if (normalized != d)
+                        warnings.Add($"Reminder.{name}.PeriodSeconds: value '{value}' normalized to {normalized.ToString(CultureInfo.InvariantCulture)}.");
+                    rb.PeriodSeconds = normalized;
                 }
                 else
                 {
-                    rb.CooldownSeconds = 0;
-                    warnings.Add($"Reminder.{name}.CooldownSeconds: invalid value '{value}', using 0.");
+                    rb.PeriodSeconds = ReminderRule.DefaultPeriodSeconds;
+                    warnings.Add($"Reminder.{name}.PeriodSeconds: invalid value '{value}', using {ReminderRule.DefaultPeriodSeconds.ToString(CultureInfo.InvariantCulture)}.");
+                }
+            }
+            else if (key.EndsWith(sendsSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                var name = RuleNameOf(key, sendsSuffix);
+                var rb = GetOrAdd(rules, name);
+                rb.HasSendsField = true;
+                if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n))
+                {
+                    var normalized = ReminderRule.NormalizeSends(n);
+                    if (normalized != n)
+                        warnings.Add($"Reminder.{name}.SendsPerPeriod: value '{value}' normalized to {normalized}.");
+                    rb.SendsPerPeriod = normalized;
+                }
+                else
+                {
+                    rb.SendsPerPeriod = ReminderRule.DefaultSendsPerPeriod;
+                    warnings.Add($"Reminder.{name}.SendsPerPeriod: invalid value '{value}', using {ReminderRule.DefaultSendsPerPeriod}.");
+                }
+            }
+            else if (key.EndsWith(legacyCooldownSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                var name = RuleNameOf(key, legacyCooldownSuffix);
+                var rb = GetOrAdd(rules, name);
+                if (TryParseInvariantDouble(value, out var d))
+                {
+                    rb.LegacyCooldownSeconds = Math.Max(0d, d);
+                    if (d < 0d)
+                        warnings.Add($"Reminder.{name}.CooldownSeconds: negative value '{value}' clamped to 0 before migration.");
+                }
+                else
+                {
+                    rb.LegacyCooldownSeconds = 0d;
+                    warnings.Add($"Reminder.{name}.CooldownSeconds: invalid value '{value}', treating as 0 and migrating to Once.");
                 }
             }
         }
 
+        private static bool TryParseInvariantDouble(string value, out double result)
+        {
+            return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out result)
+                && NumericSafety.IsFinite(result);
+        }
+
         private static string RuleNameOf(string key, string suffix)
         {
-            return key.Substring(ReminderPrefix.Length, key.Length - ReminderPrefix.Length - suffix.Length);
+            return key.Substring(ReminderPrefix.Length, key.Length - ReminderPrefix.Length - suffix.Length).Trim();
         }
 
         private static RuleBuilder GetOrAdd(Dictionary<string, RuleBuilder> rules, string name)
@@ -198,7 +290,13 @@ namespace HealthAutoArrange.Core
             public ReminderMode Mode = ReminderMode.Log;
             public bool ModeValid = true;
             public string InvalidModeValue;
-            public double CooldownSeconds;
+            public bool HasRepeatModeField;
+            public bool HasPeriodField;
+            public bool HasSendsField;
+            public ReminderRepeatMode RepeatMode = ReminderRepeatMode.Once;
+            public double PeriodSeconds = ReminderRule.DefaultPeriodSeconds;
+            public int SendsPerPeriod = ReminderRule.DefaultSendsPerPeriod;
+            public double? LegacyCooldownSeconds;
         }
     }
 }

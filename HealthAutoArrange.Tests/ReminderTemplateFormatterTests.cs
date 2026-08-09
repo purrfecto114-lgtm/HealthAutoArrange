@@ -71,5 +71,14 @@ namespace HealthAutoArrange.Tests
             var result = ReminderTemplateFormatter.Render("{intensity}", Ctx(intensity: 7));
             Assert.Equal("7", result);
         }
+
+
+        [Fact]
+        public void UnknownIntensity_RendersQuestionMarkInsteadOfGuessingTrailingDigits()
+        {
+            var ctx = new ReminderRenderContext("modstate1234", "", "", -1, "modstate123");
+            Assert.Equal("modstate123 ?", ReminderTemplateFormatter.Render("{name} {intensity}", ctx));
+            Assert.Equal("modstate123", ctx.BaseId);
+        }
     }
 }
