@@ -12,11 +12,13 @@ namespace HealthAutoArrange.Plugin
     /// <summary>
     /// Unity/游戏适配层（融合 MoodleSorter_Source 的运行时优势）：
     /// - AddMoodle 前缀捕获元数据（runtime id、图标、强度、显示名、critical、创建顺序、manager、行）；
-    /// - 刷新边界后延迟一帧扫描/排序/提醒，避开 Unity 同帧延迟销毁/重建；
+    /// - 刷新 postfix 只记录刷新边界；真正扫描/排序严格跨到后续 Unity frame，避免重建栈内改层级；
     /// - 按 manager.moodles 扫描 Moodle 组件，支持 main/side 行隔离；
     /// - Auto 渲染模式：LayoutGroup → anchoredPosition slots → sibling index；
     /// - 未知状态保持现有 End/Keep 策略（由 SortPlan 决定）；
-    /// - 保留 BottomAlert/Log 提醒；所有 Unity 访问异常均隔离并记录。
+    /// - 保留 BottomAlert/Log 提醒；可捕获的托管异常会隔离并记录。
+    /// 注意：任何托管 try/catch 都不能承诺拦住 Unity 原生层崩溃、StackOverflow 或进程级故障，
+    /// 因此适配层仍以减少重入与避开 Destroy 延迟窗口为首要稳定性策略。
     /// </summary>
     public sealed class UnityUiAdapter
     {
@@ -40,6 +42,7 @@ namespace HealthAutoArrange.Plugin
         private int _captureFloorSequence;
         private readonly Dictionary<int, int> _captureBoundaryByManager = new Dictionary<int, int>();
         private const float ReminderTickSeconds = 0.25f;
+        private const int MaxRememberedErrorMessages = 64;
         private readonly Dictionary<string, float> _lastErrorLogTime = new Dictionary<string, float>();
 
         public UnityUiAdapter(
@@ -70,7 +73,10 @@ namespace HealthAutoArrange.Plugin
         {
             try
             {
-                if (_manager != null) Scan(_manager);
+                // Manual/catalog reads must obey the same hierarchy-stability gate as sorting.
+                // F8 can be pressed in the exact refresh frame; scanning here would otherwise
+                // reintroduce the stale/destroy-pending read path that the deferred scheduler avoids.
+                if (!_scheduler.HasPending && _manager != null) Scan(_manager);
             }
             catch (Exception ex)
             {
@@ -99,7 +105,7 @@ namespace HealthAutoArrange.Plugin
             // Keep the last confirmed presence snapshot and request a fresh scan. The master UI
             // toggle controls sorting only; reminder rules remain independent as stated in the GUI.
             // This also avoids the historical save->retrigger reminder bug.
-            if (_manager != null) _scheduler.OnGameRefreshCompleted();
+            if (_manager != null) ScheduleAfterCurrentFrame();
         }
 
         /// <summary>
@@ -110,7 +116,7 @@ namespace HealthAutoArrange.Plugin
         {
             if (!_runtime.Enabled) return;
             _lastSignature = string.Empty;
-            _scheduler.OnGameRefreshCompleted();
+            ScheduleAfterCurrentFrame();
         }
 
         /// <summary>
@@ -142,12 +148,22 @@ namespace HealthAutoArrange.Plugin
         public void OnMoodlesUpdated(MoodleManager manager)
         {
             if (manager == null) return;
+
+            // Manager normally is singular. Clear per-manager sequence boundaries when the actual
+            // object changes so a recycled Unity instance ID can never inherit a stale capture
+            // floor from a previously destroyed manager. Capture resolution itself remains scoped
+            // by manager reference.
+            if (!ReferenceEquals(_manager, manager))
+            {
+                _captureBoundaryByManager.Clear();
+                _captureFloorSequence = 0;
+            }
             _manager = manager;
 
             // AddMoodle calls for this refresh have already happened before this postfix. Move the
-            // metadata window forward without clearing the registry in a prefix: CUCoreLib itself
-            // injects custom moodles from an AddAllMoodles prefix, so a competing prefix clear would
-            // be Harmony-order sensitive and could erase valid third-party captures.
+            // metadata window forward without clearing the registry in a prefix. Other mods may
+            // patch the same refresh/add paths, so a competing prefix clear would be Harmony-order
+            // sensitive and could erase captures produced earlier in the same refresh.
             var managerKey = manager.GetInstanceID();
             if (!_captureBoundaryByManager.TryGetValue(managerKey, out _captureFloorSequence))
                 _captureFloorSequence = 0;
@@ -165,13 +181,20 @@ namespace HealthAutoArrange.Plugin
             // 只有实际 UI 重排受主开关控制。
             if (_runtime.Enabled) _lastSignature = string.Empty;
 
-            // 同帧执行扫描/排序：postfix 仍在游戏刷新方法栈内，渲染发生在帧末，
-            // 此时 SetSiblingIndex 会在本帧渲染时生效，避免新图标先以默认顺序显示一帧（闪烁覆盖）。
-            // 失败路径（manager 为空/扫描异常）由 ProcessRefresh 内部重新安排到下一帧兜底。
-            if (_scheduler.TryRunNow() == SortDispatchDecision.RunNow)
-            {
-                ProcessRefresh();
-            }
+            // 不在 MoodleManager.UpdateMoodles/AddAllMoodles 的 Harmony postfix 调用栈内
+            // 扫描或修改 Transform 层级。Unity 的 Destroy 在当前 Update 循环结束后才真正
+            // 销毁对象；严格跨 frame 可避免读到待销毁旧节点，也切断 SetSiblingIndex 引起的
+            // Transform 子级变化回调与 Moodle 刷新之间的同步递归链。
+            ScheduleAfterCurrentFrame();
+        }
+
+        /// <summary>
+        /// 将刷新合并到至少下一 Unity frame。使用 frame token 而不是仅依赖“下一次 Update”，
+        /// 因为不同 MonoBehaviour 的 Update 顺序并不等同于跨帧。
+        /// </summary>
+        private void ScheduleAfterCurrentFrame()
+        {
+            _scheduler.OnGameRefreshCompleted(Time.frameCount);
         }
 
         /// <summary>
@@ -180,7 +203,14 @@ namespace HealthAutoArrange.Plugin
         /// </summary>
         public void Update()
         {
-            if (_scheduler.TryDeferred())
+            // UnityEngine.Object 销毁后会出现“托管引用非 null、Unity == null”的假 null。
+            // 即使场景切换没有再触发 Moodle refresh，也要及时丢弃旧 manager/提醒快照。
+            if (!ReferenceEquals(_manager, null) && _manager == null)
+            {
+                ResetLostManagerState();
+            }
+
+            if (_scheduler.TryDeferred(Time.frameCount))
             {
                 ProcessRefresh();
             }
@@ -199,13 +229,16 @@ namespace HealthAutoArrange.Plugin
 
         /// <summary>
         /// 执行一次刷新处理：扫描 → 提醒 → 排序。
-        /// 无法立即处理时安排下一帧重试；所有 Unity 访问异常均隔离并记录。
+        /// 游戏刷新已由 scheduler 保证跨帧；扫描失败时放弃本轮并等待下一刷新边界。
         /// </summary>
         private void ProcessRefresh()
         {
             if (_manager == null)
             {
-                _scheduler.OnRefreshCompleted(canRunNow: false);
+                // UnityEngine.Object 的“假 null”表示 manager 已被销毁。旧实现会在这里
+                // 每帧重新挂起，形成永久重试循环；同时提醒继续使用旧状态快照。
+                // 现在清掉失效 manager，并把存在快照变为空，等待游戏提供新的刷新边界。
+                ResetLostManagerState();
                 return;
             }
 
@@ -217,7 +250,8 @@ namespace HealthAutoArrange.Plugin
             catch (Exception ex)
             {
                 LogThrottled($"Moodle scan failed: {ex.Message}");
-                _scheduler.OnRefreshCompleted(canRunNow: false);
+                // 已经跨过刷新帧仍无法安全扫描时，不做每帧无限重试。下一次游戏刷新
+                // 或用户手动重排会再次调度；这样优先保护主循环稳定性。
                 return;
             }
 
@@ -235,12 +269,34 @@ namespace HealthAutoArrange.Plugin
                 var signature = BuildSignature(visuals);
                 if (signature == _lastSignature) return;
                 ApplySort(visuals);
+                // SetSiblingIndex can synchronously trigger hierarchy-change callbacks. If one of
+                // those callbacks caused another Moodle refresh, its postfix has already queued a
+                // later frame. Do not rescan a hierarchy that may now contain Destroy-pending nodes.
+                if (_scheduler.HasPending)
+                {
+                    _lastSignature = string.Empty;
+                    return;
+                }
                 _lastSignature = BuildSignature(Scan(_manager));
             }
             catch (Exception ex)
             {
                 LogThrottled($"Moodle sorting failed safely: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// 丢弃已销毁/丢失的 MoodleManager 以及与其绑定的短期 UI 状态。
+        /// 不触碰用户配置或提醒规则本身；新 manager 的下一次刷新会重新建立快照。
+        /// </summary>
+        private void ResetLostManagerState()
+        {
+            _manager = null;
+            _captureBoundaryByManager.Clear();
+            _captureFloorSequence = 0;
+            _lastSignature = string.Empty;
+            UpdatePresentSnapshot(new List<MoodleVisual>());
+            _nextReminderTickRealtime = 0f;
         }
 
         /// <summary>
@@ -251,8 +307,17 @@ namespace HealthAutoArrange.Plugin
             try
             {
                 _log?.Invoke(LogLevel.Info, "===== HealthAutoArrange diagnostic dump =====");
-                _log?.Invoke(LogLevel.Info, $"Pending={_scheduler.HasPending}, Manager={(_manager != null ? _manager.name : "null")}");
+                if (_scheduler.HasPending)
+                {
+                    // Do not let an F9 diagnostic read bypass the same-frame/next-frame stability
+                    // gate. Even reading manager.name is avoided here because the manager may be a
+                    // Unity fake-null/destroy-pending object during a scene/UI rebuild.
+                    _log?.Invoke(LogLevel.Info, "Pending=True; live Moodle hierarchy scan skipped until a later frame.");
+                    _log?.Invoke(LogLevel.Info, "===== end HealthAutoArrange dump =====");
+                    return;
+                }
 
+                _log?.Invoke(LogLevel.Info, $"Pending=False, Manager={(_manager != null ? _manager.name : "null")}");
                 var visuals = _manager != null ? Scan(_manager) : new List<MoodleVisual>();
                 if (visuals.Count == 0)
                 {
@@ -291,7 +356,8 @@ namespace HealthAutoArrange.Plugin
         /// </summary>
         private List<MoodleVisual> Scan(MoodleManager manager)
         {
-            var result = new List<MoodleVisual>();
+            if (manager == null) throw new InvalidOperationException("MoodleManager is unavailable.");
+
             Transform container;
             try
             {
@@ -299,19 +365,27 @@ namespace HealthAutoArrange.Plugin
             }
             catch (Exception ex)
             {
-                LogThrottled($"MoodleManager.moodles access failed: {ex.Message}");
-                return result;
+                throw new InvalidOperationException("MoodleManager.moodles access failed.", ex);
             }
-            if (container == null) return result;
+            if (container == null) return new List<MoodleVisual>();
 
+            // Never turn a failed/partial hierarchy enumeration into a valid snapshot. A partial
+            // snapshot is worse than skipping one refresh because it can drive reminders from false
+            // absence data and, more importantly, can produce a stale sort plan against a hierarchy
+            // that changed while it was being read.
+            var result = new List<MoodleVisual>();
             try
             {
-                for (int i = 0; i < container.childCount; i++)
+                var expectedChildCount = container.childCount;
+                for (int i = 0; i < expectedChildCount; i++)
                 {
+                    if (container == null || container.childCount != expectedChildCount)
+                        throw new InvalidOperationException("Moodle hierarchy changed during scan.");
+
                     var child = container.GetChild(i);
                     if (child == null) continue;
-                    // 跳过非激活节点：游戏刷新帧内旧节点可能尚未销毁（Unity 延迟销毁），
-                    // 同帧排序时避免 ghost 节点参与排序/观察。
+                    // 防御性跳过非激活节点。排序本身已严格跨帧，但场景切换或其他
+                    // Mod 仍可能留下尚未完成生命周期清理的非激活 UI 节点。
                     if (!child.gameObject.activeInHierarchy) continue;
                     var moodle = child.GetComponent<Moodle>();
                     if (moodle == null) continue;
@@ -319,6 +393,9 @@ namespace HealthAutoArrange.Plugin
                     var runtimeId = moodle.type;
                     if (string.IsNullOrWhiteSpace(runtimeId)) runtimeId = child.name;
                     var rect = child as RectTransform;
+                    var siblingIndex = child.GetSiblingIndex();
+                    if (child.parent != container || siblingIndex != i)
+                        throw new InvalidOperationException("Moodle hierarchy reordered during scan.");
 
                     var capture = _captures.Resolve(runtimeId, manager, _captureFloorSequence);
                     result.Add(new MoodleVisual
@@ -327,16 +404,23 @@ namespace HealthAutoArrange.Plugin
                         RectTransform = rect,
                         RuntimeId = runtimeId,
                         IsSide = moodle.isSide,
-                        SiblingIndex = child.GetSiblingIndex(),
+                        SiblingIndex = siblingIndex,
                         OriginalAnchoredPosition = rect != null ? rect.anchoredPosition : Vector2.zero,
                         Capture = capture
                     });
-                    _observations.Observe(runtimeId, capture, moodle.isSide, DateTimeOffset.UtcNow);
                 }
+
+                if (container == null || container.childCount != expectedChildCount)
+                    throw new InvalidOperationException("Moodle hierarchy changed before scan completed.");
+
+                // Commit observation metadata only after the hierarchy snapshot proved stable.
+                var observedAt = DateTimeOffset.UtcNow;
+                foreach (var visual in result)
+                    _observations.Observe(visual.RuntimeId, visual.Capture, visual.IsSide, observedAt);
             }
             catch (Exception ex)
             {
-                LogThrottled($"Moodle child enumeration failed: {ex.Message}");
+                throw new InvalidOperationException("Moodle child enumeration was not stable.", ex);
             }
             return result;
         }
@@ -353,9 +437,35 @@ namespace HealthAutoArrange.Plugin
                 var parent = parentGroup.Key;
                 var members = parentGroup.ToList();
                 var mode = ResolveMode(parent, members);
-                bool changed = mode == RenderMode.AnchoredPosition
-                    ? ApplyAnchoredSlots(members)
-                    : ApplySiblingOrder(parent, members);
+                bool changed;
+                if (mode == RenderMode.AnchoredPosition)
+                {
+                    changed = ApplyAnchoredSlots(members);
+                }
+                else if (CanSafelyUseSiblingOrder(parent, members))
+                {
+                    changed = ApplySiblingOrder(parent, members);
+                }
+                else
+                {
+                    // Sibling reordering is only deterministic when this parent is a single Moodle
+                    // row with no unobserved/inactive/non-Moodle direct children. In a mixed parent,
+                    // SetSiblingIndex necessarily shifts those other children and every write can
+                    // synchronously invoke hierarchy callbacks. Prefer one missed arrangement over
+                    // mutating an unknown/shared UI topology.
+                    LogThrottled("Skipped sibling sorting because the Moodle parent has mixed or unstable direct children.");
+                    continue;
+                }
+
+                // A write in the first parent group can synchronously trigger another Moodle refresh.
+                // Stop the whole stale snapshot here; continuing with later parent groups would apply
+                // decisions computed from pre-refresh objects. The queued frame will rescan all groups.
+                if (_scheduler.HasPending)
+                {
+                    _lastSignature = string.Empty;
+                    return;
+                }
+
                 // 仅实际写入布局时记录，且使用 Debug 级（默认不进 LogOutput.log），
                 // 避免游戏每帧重建图标导致的逐帧日志堆积。
                 if (changed)
@@ -373,6 +483,12 @@ namespace HealthAutoArrange.Plugin
         {
             var now = Time.realtimeSinceStartup;
             if (_lastErrorLogTime.TryGetValue(message, out var last) && now - last < 5f) return;
+            if (!_lastErrorLogTime.ContainsKey(message) && _lastErrorLogTime.Count >= MaxRememberedErrorMessages)
+            {
+                // Exception text can contain changing object/value details. Never let a long-running
+                // fault pattern turn this throttle cache itself into an unbounded memory leak.
+                _lastErrorLogTime.Clear();
+            }
             _lastErrorLogTime[message] = now;
             _log?.Invoke(LogLevel.Warning, message);
         }
@@ -414,45 +530,86 @@ namespace HealthAutoArrange.Plugin
             }
         }
 
+
         /// <summary>
-        /// 行隔离的 sibling 重排：仅移动本行成员，保持另一行位置。
+        /// Sibling mode is intentionally conservative: every direct child must be one of the active
+        /// Moodle nodes in this parent, and they must all belong to the same logical row. With gaps
+        /// (decorations, inactive Destroy-pending nodes, another row, third-party UI children), a
+        /// sequence of SetSiblingIndex calls can displace unrelated objects between interruption
+        /// points. Anchored mode does not need this restriction because it does not mutate hierarchy.
+        /// </summary>
+        private static bool CanSafelyUseSiblingOrder(Transform parent, List<MoodleVisual> members)
+        {
+            if (parent == null || members == null || members.Count < 2) return false;
+            if (members.Select(v => v.IsSide).Distinct().Count() != 1) return false;
+            if (parent.childCount != members.Count) return false;
+
+            for (int i = 0; i < members.Count; i++)
+            {
+                var child = parent.GetChild(i);
+                if (child == null) return false;
+                var found = false;
+                for (int j = 0; j < members.Count; j++)
+                {
+                    if (members[j].Component == child)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// 安全拓扑下的 sibling 重排：父节点必须只包含同一行的活动 Moodle。
         /// </summary>
         private bool ApplySiblingOrder(Transform parent, List<MoodleVisual> members)
         {
             var orders = PlanRows(members);
-            var desiredChildren = new List<Transform>();
-            for (int i = 0; i < parent.childCount; i++) desiredChildren.Add(parent.GetChild(i));
+            var expectedChildCount = parent.childCount;
+            bool changed = false;
 
+            // CanSafelyUseSiblingOrder 已保证这里没有非 Moodle/另一行/非激活直系子节点。
+            // 因而按槽位递进只会重排这一行本身，不会把未知 UI 子对象卷入写操作。
             foreach (var kv in orders)
             {
-                var rowMembers = members.Where(v => v.IsSide == kv.Key).ToList();
+                var rowMembers = members
+                    .Where(v => v.IsSide == kv.Key && v.Component != null && v.Component.parent == parent)
+                    .ToList();
+                if (rowMembers.Count < 2) continue;
+
+                var slots = rowMembers.Select(v => v.Component.GetSiblingIndex()).OrderBy(i => i).ToList();
                 var order = kv.Value;
-                var slots = new List<int>();
-                for (int i = 0; i < desiredChildren.Count; i++)
-                {
-                    if (rowMembers.Any(v => v.Component == desiredChildren[i])) slots.Add(i);
-                }
                 for (int i = 0; i < slots.Count && i < order.Count; i++)
                 {
-                    desiredChildren[slots[i]] = rowMembers[order[i]].Component;
-                }
-            }
+                    if (order[i] < 0 || order[i] >= rowMembers.Count) continue;
+                    var child = rowMembers[order[i]].Component;
+                    if (child == null || child.parent != parent)
+                    {
+                        // Topology drift without a nested refresh callback still invalidates every
+                        // precomputed sibling slot. Queue a fresh frame before abandoning this plan.
+                        ScheduleAfterCurrentFrame();
+                        return changed;
+                    }
 
-            // 布局已正确时不做多余写入。
-            bool changed = false;
-            for (int i = 0; i < desiredChildren.Count; i++)
-            {
-                if (desiredChildren[i] != null && desiredChildren[i].GetSiblingIndex() != i)
-                {
+                    var slot = slots[i];
+                    if (child.GetSiblingIndex() == slot) continue;
+                    child.SetSiblingIndex(slot);
                     changed = true;
-                    break;
-                }
-            }
-            if (!changed) return changed;
 
-            for (int i = 0; i < desiredChildren.Count; i++)
-            {
-                if (desiredChildren[i] != null) desiredChildren[i].SetSiblingIndex(i);
+                    // A hierarchy write may synchronously invoke OnTransformChildrenChanged. If
+                    // that caused a fresh Moodle rebuild, or the parent child count changed for any
+                    // other reason, the precomputed plan is stale: stop now and let the queued
+                    // next-frame scan rebuild the plan from reality.
+                    if (_scheduler.HasPending) return changed;
+                    if (parent == null || parent.childCount != expectedChildCount)
+                    {
+                        ScheduleAfterCurrentFrame();
+                        return changed;
+                    }
+                }
             }
             return changed;
         }
@@ -483,6 +640,7 @@ namespace HealthAutoArrange.Plugin
                     {
                         target.RectTransform.anchoredPosition = new Vector2(slot.x, current.y);
                         anyWrite = true;
+                        if (_scheduler.HasPending) return anyWrite;
                     }
                 }
             }

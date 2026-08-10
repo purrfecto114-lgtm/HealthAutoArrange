@@ -16,7 +16,8 @@ namespace HealthAutoArrange.Plugin
     /// BepInEx 入口：读取配置、构建适配器、注册 Harmony 补丁、接入 F8 设置窗口。
     /// 排序实际以独立 rules 文件（com.healthautoarrange.plugin.rules.cfg）为准；
     /// BepInEx 的 com.healthautoarrange.plugin.cfg 仅保留默认模板与热键，用于兼容。
-    /// 补丁目标缺失或任何初始化失败时仅记录警告，不阻塞游戏启动。
+    /// 单个可选补丁目标缺失时降级并记录；运行期可捕获的托管异常尽量隔离。
+    /// 不宣称能够吞掉 Unity 原生层故障，也不把 ABI/依赖不匹配伪装成“安全可继续”。
     /// </summary>
     [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.1.5")]
     public class Plugin : BaseUnityPlugin,
@@ -46,6 +47,32 @@ namespace HealthAutoArrange.Plugin
         private void Awake()
         {
             PluginLog = Logger;
+            try
+            {
+                InitializePlugin();
+            }
+            catch (Exception ex)
+            {
+                // A partially initialized BaseUnityPlugin may still receive Update/OnGUI callbacks.
+                // If initialization fails after creating state or applying one of our Harmony patches,
+                // fail closed: remove our patches, clear static entry points, and disable this component.
+                try { Logger?.LogError($"HealthAutoArrange initialization failed; plugin disabled: {ex}"); } catch { }
+                try { _harmony?.UnpatchSelf(); } catch (Exception cleanupEx)
+                {
+                    try { Logger?.LogWarning($"HealthAutoArrange initialization cleanup failed: {cleanupEx.Message}"); } catch { }
+                }
+                Adapter = null;
+                SettingsWindow = null;
+                PluginLog = null;
+                _overlay = null;
+                _presentation = null;
+                _harmony = null;
+                enabled = false;
+            }
+        }
+
+        private void InitializePlugin()
+        {
             Logger.LogInfo($"HealthAutoArrange.Plugin loading: {Info.Metadata.Name} v{Info.Metadata.Version}");
             Logger.LogInfo($"Runtime: Unity={Application.unityVersion}, Game={Application.version}, Assembly-CSharp={typeof(MoodleManager).Assembly.GetName().Version}");
 
@@ -90,8 +117,10 @@ namespace HealthAutoArrange.Plugin
             _harmony = new Harmony("com.healthautoarrange.plugin");
             try
             {
-                var refreshMethod = AccessTools.Method(typeof(MoodleManager), "UpdateMoodles")
-                    ?? AccessTools.Method(typeof(MoodleManager), "AddAllMoodles");
+                // Patch only the reverse-engineered parameterless signatures. A name-only lookup
+                // can become ambiguous or silently select a new overload after a game update.
+                var refreshMethod = AccessTools.Method(typeof(MoodleManager), "UpdateMoodles", Type.EmptyTypes)
+                    ?? AccessTools.Method(typeof(MoodleManager), "AddAllMoodles", Type.EmptyTypes);
                 if (refreshMethod == null)
                 {
                     Logger.LogWarning("Neither MoodleManager.UpdateMoodles nor AddAllMoodles was found; sorting refresh hook disabled.");
@@ -144,10 +173,13 @@ namespace HealthAutoArrange.Plugin
                 }
                 else
                 {
-                    _harmony.Patch(
-                        pointerOverUi,
-                        prefix: new HarmonyMethod(typeof(GamePatches), nameof(GamePatches.IsPointerOverUIElementPrefix)));
-                    Logger.LogInfo("Patched UIUtil.IsPointerOverUIElement input blocking.");
+                    var pointerPostfix = new HarmonyMethod(
+                        typeof(GamePatches), nameof(GamePatches.IsPointerOverUIElementPostfix))
+                    {
+                        priority = Priority.Last
+                    };
+                    _harmony.Patch(pointerOverUi, postfix: pointerPostfix);
+                    Logger.LogInfo("Patched UIUtil.IsPointerOverUIElement input blocking (composing postfix).");
                 }
             }
             catch (Exception ex)
@@ -166,11 +198,11 @@ namespace HealthAutoArrange.Plugin
             try
             {
                 Adapter?.Update();
-                if (Input.GetKeyDown(_settingsKey.Value))
+                if (_settingsKey != null && Input.GetKeyDown(_settingsKey.Value))
                 {
                     ToggleSettingsWindow();
                 }
-                if (Input.GetKeyDown(_debugDumpKey.Value))
+                if (_debugDumpKey != null && Input.GetKeyDown(_debugDumpKey.Value))
                 {
                     Logger.LogInfo("F9 diagnostics requested.");
                     DumpDiagnostics();
@@ -184,7 +216,7 @@ namespace HealthAutoArrange.Plugin
 
         /// <summary>
         /// IMGUI 设置窗口绘制 + 透明提醒 overlay 绘制。
-        /// 两者各自隔离异常并记录，不影响游戏；overlay 不依赖 F8 窗口是否打开。
+        /// 两者分别捕获可恢复的托管异常；overlay 不依赖 F8 窗口是否打开。
         /// </summary>
         private void OnGUI()
         {
@@ -232,17 +264,21 @@ namespace HealthAutoArrange.Plugin
             try
             {
                 model.Normalize();
+                var persisted = true;
                 try
                 {
                     RulesFileStore.Write(_rulesPath, model);
                 }
                 catch (Exception ex)
                 {
+                    persisted = false;
                     Logger.LogWarning($"Failed to write rules file: {ex.Message}");
                 }
                 ApplyModel(model);
                 _uiModel = model;
-                Logger.LogInfo("Settings saved and applied.");
+                Logger.LogInfo(persisted
+                    ? "Settings saved and applied."
+                    : "Settings applied in memory, but the rules file was not saved.");
             }
             catch (Exception ex)
             {
@@ -522,7 +558,25 @@ namespace HealthAutoArrange.Plugin
 
         private void OnDestroy()
         {
-            _harmony?.UnpatchSelf();
+            try
+            {
+                _harmony?.UnpatchSelf();
+            }
+            catch (Exception ex)
+            {
+                Logger?.LogWarning($"HealthAutoArrange: cleanup unpatch failed: {ex.Message}");
+            }
+            finally
+            {
+                // BepInEx normally keeps plugins loaded for the process lifetime, but clearing
+                // static references makes scene/plugin teardown and developer hot-reload safer.
+                Adapter = null;
+                SettingsWindow = null;
+                PluginLog = null;
+                _overlay = null;
+                _presentation = null;
+                _harmony = null;
+            }
         }
     }
 }

@@ -16,12 +16,25 @@ jobs:
       GAME_REFS_URL: ${{ secrets.GAME_REFS_URL }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup .NET 8
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '8.0.x'
+
+      - name: Static smoke
+        run: python3 tools/static_smoke.py
+
+      - name: Validate release version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            python tools/version_check.py --tag $env:GITHUB_REF_NAME
+          } else {
+            python tools/version_check.py
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Validate GAME_REFS_URL secret
         shell: pwsh

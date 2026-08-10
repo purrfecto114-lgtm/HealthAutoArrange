@@ -1,5 +1,6 @@
 from pathlib import Path
-import re, sys
+import sys
+from version_check import validate_versions
 ROOT = Path(__file__).resolve().parents[1]
 errors=[]; passed=[]
 def check(name, cond):
@@ -44,14 +45,15 @@ check('capture resolution can be scoped to current manager', 'ReferenceEquals(it
 check('capture fallback preserves semantic numeric icon IDs', 'MatchesSeverityFamily(iconId, normalized)' in capture and 'MoodleIdentity.BaseId(item.IconId) == baseId' not in capture)
 check('anchored auto mode requires horizontal row slots', 'hasDistinctHorizontalSlots' in adapter and 'OriginalAnchoredPosition.x' in adapter)
 
-# v1.1.3 reminder safety / migration / localization contracts
+# reminder safety / migration / localization contracts
 repeat=text('HealthAutoArrange.Core/ReminderRepeatMode.cs')
 rule=text('HealthAutoArrange.Core/ReminderRule.cs')
 engine=text('HealthAutoArrange.Core/ReminderEngine.cs')
 presentation=text('HealthAutoArrange.Core/ReminderPresentation.cs')
 dispatcher=text('HealthAutoArrange.Plugin/ReminderDispatcher.cs')
 ui=text('HealthAutoArrange.Core/UiConfigModel.cs')
-check('plugin version is 1.1.3', '"1.1.3"' in plugin and 'AssemblyVersion("1.1.3.0")' in text('HealthAutoArrange.Plugin/Properties/AssemblyInfo.cs'))
+version_info, version_errors = validate_versions(ROOT)
+check('plugin/assembly version metadata is internally consistent', version_info is not None and not version_errors)
 check('reminder supports once and while-present modes', 'Once = 0' in repeat and 'WhilePresent = 1' in repeat)
 check('legacy zero cooldown migrates to once', 'CooldownSeconds=0 migrated to RepeatMode=Once' in parser and 'cooldownSeconds > 0d ? ReminderRepeatMode.WhilePresent : ReminderRepeatMode.Once' in rule)
 check('repeat interval is period divided by count', 'PeriodSeconds / SendsPerPeriod' in rule)
@@ -76,7 +78,7 @@ check('repeat period has a finite upper bound', 'MaximumPeriodSeconds = 604800d'
 check('partial legacy/new frequency migration is field-aware', 'HasRepeatModeField' in parser and 'HasPeriodField' in parser and 'HasSendsField' in parser)
 check('duplicate reminder names cannot share runtime episode state', '_runtime = _rules.Select(_ => new RuleRuntimeState()).ToList()' in engine)
 
-# v1.1.3 localization / stale metadata / numeric robustness
+# localization / stale metadata / numeric robustness
 textcat=text('HealthAutoArrange.Core/UiTextCatalog.cs')
 overlay=text('HealthAutoArrange.Plugin/TransparentReminderOverlay.cs')
 numeric=text('HealthAutoArrange.Core/NumericSafety.cs')
@@ -86,11 +88,39 @@ check('overlay follows GUI language switch', '_overlay?.SetLanguage(chinese)' in
 check('hardcoded GUI helper strings moved into text catalog', 'UnknownMovedNote' in textcat and 'SelectState' in textcat and 'UseLog' in textcat and 'CatalogRefreshFailed' in textcat)
 check('capture metadata is bounded by refresh sequence', 'LatestSequence' in capture and 'minSequenceExclusive' in capture and '_captureBoundaryByManager' in adapter)
 check('capture refresh window is manager scoped', 'manager.GetInstanceID()' in adapter and '_captureBoundaryByManager.TryGetValue' in adapter)
+check('manager replacement clears stale capture sequence boundaries', '!ReferenceEquals(_manager, manager)' in adapter and '_captureBoundaryByManager.Clear();' in adapter)
 matcher=text('HealthAutoArrange.Core/StateMatcher.cs')
 check('GUI severity-family pattern only accepts numeric suffixes', 'pattern.EndsWith("#"' in matcher and '!char.IsDigit(suffix[i])' in matcher)
 check('legacy broad star wildcard remains supported', 'pattern.EndsWith("*"' in matcher)
 check('non-finite visual inputs are rejected', 'ClampFinite' in numeric and 'NumericSafety.IsFinite(parsed)' in window and 'NumericSafety.IsFinite(result)' in parser)
 check('narrow reminder layout splits long English numeric controls', 'if (narrow)' in window and 'DrawLabeledFloat' in window and 'GUILayout.Label(text.SendsPerPeriod, GUILayout.Width(narrow ? 150f : 132f))' in window)
+check('save log distinguishes persistence failure from in-memory apply', 'Settings applied in memory, but the rules file was not saved.' in plugin)
+check('plugin teardown clears static runtime references', 'Adapter = null;' in plugin and 'SettingsWindow = null;' in plugin and 'PluginLog = null;' in plugin)
+check('partial initialization fails closed and disables plugin', 'InitializePlugin();' in plugin and 'enabled = false;' in plugin and 'initialization failed; plugin disabled' in plugin)
+check('exception throttle cache is bounded', 'MaxRememberedErrorMessages = 64' in adapter and '_lastErrorLogTime.Clear();' in adapter)
+
+# crash/reentrancy hardening contracts (v2 audit)
+scheduler=text('HealthAutoArrange.Core/SortScheduler.cs')
+scheduler_tests=text('HealthAutoArrange.Tests/SortSchedulerTests.cs')
+patches=text('HealthAutoArrange.Plugin/GamePatches.cs')
+check('game refresh path uses frame-aware scheduler gate', '_scheduler.OnGameRefreshCompleted(Time.frameCount)' in adapter and '_scheduler.TryDeferred(Time.frameCount)' in adapter)
+check('adapter never forces same-frame game-refresh sorting', '_scheduler.TryRunNow()' not in adapter)
+check('scheduler tests reject same-frame deferred execution', 'Assert.False(scheduler.TryDeferred(100))' in scheduler_tests and 'Assert.True(scheduler.TryDeferred(101))' in scheduler_tests)
+check('frame gate is wrap-safe equality based', '_hasFrameGate && currentFrame == _deferFromFrame' in scheduler and 'FrameTokenWrap_DoesNotPermanentlyBlockPendingWork' in scheduler_tests)
+check('destroyed manager does not enter permanent refresh retry loop', '_scheduler.OnRefreshCompleted(canRunNow: false)' not in adapter and 'UpdatePresentSnapshot(new List<MoodleVisual>())' in adapter)
+check('destroyed manager is cleared even without a new refresh callback', '!ReferenceEquals(_manager, null) && _manager == null' in adapter and 'ResetLostManagerState();' in adapter)
+check('nested Moodle refresh aborts stale post-sort rescan', 'if (_scheduler.HasPending)' in adapter and 'Do not rescan a hierarchy' in adapter)
+check('sibling reorder only moves planned Moodle nodes', 'desiredChildren' not in adapter and 'child.SetSiblingIndex(slot);' in adapter)
+check('sibling mode rejects mixed or unstable parent topology', 'CanSafelyUseSiblingOrder' in adapter and 'parent.childCount != members.Count' in adapter and 'members.Select(v => v.IsSide).Distinct().Count() != 1' in adapter)
+check('UI pointer blocking composes as a postfix', 'IsPointerOverUIElementPostfix' in patches and 'IsPointerOverUIElementPrefix' not in patches and 'postfix: pointerPostfix' in plugin)
+check('UI pointer postfix is deliberately last priority', 'priority = Priority.Last' in plugin)
+check('refresh hook resolves exact parameterless signature', 'AccessTools.Method(typeof(MoodleManager), "UpdateMoodles", Type.EmptyTypes)' in plugin and 'AccessTools.Method(typeof(MoodleManager), "AddAllMoodles", Type.EmptyTypes)' in plugin)
+check('AddMoodle patch binds arguments by index not metadata names', 'int __0' in patches and 'string __1' in patches and 'bool __5' in patches and 'OnMoodleAdded(__instance, __0, __1, __2, __3, __4, __5)' in patches)
+check('unstable hierarchy scan fails closed instead of returning partial snapshot', 'Moodle child enumeration was not stable.' in adapter and 'throw new InvalidOperationException("Moodle hierarchy changed during scan.")' in adapter and 'Commit observation metadata only after the hierarchy snapshot proved stable.' in adapter)
+check('manual state-catalog scan obeys pending refresh gate', 'if (!_scheduler.HasPending && _manager != null) Scan(_manager);' in adapter)
+check('diagnostic live scan cannot bypass pending-frame gate', 'Pending=True; live Moodle hierarchy scan skipped until a later frame.' in adapter and 'if (_scheduler.HasPending)' in adapter.split('public void DumpDiagnostics()',1)[1].split('private List<MoodleVisual> Scan',1)[0])
+check('multi-parent sort aborts whole stale snapshot after nested refresh', 'Stop the whole stale snapshot here' in adapter and '_lastSignature = string.Empty;' in adapter.split('private void ApplySort',1)[1].split('private void LogThrottled',1)[0])
+check('sibling topology drift queues a fresh-frame rescan', 'Topology drift without a nested refresh callback' in adapter and 'ScheduleAfterCurrentFrame();' in adapter.split('private bool ApplySiblingOrder',1)[1].split('private bool ApplyAnchoredSlots',1)[0])
 
 print('HealthAutoArrange static smoke')
 for p in passed: print('[PASS]', p)
