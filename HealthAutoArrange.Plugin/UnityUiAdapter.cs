@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using BepInEx.Logging;
 using System.Text;
 using HealthAutoArrange.Core;
 using UnityEngine;
@@ -22,7 +23,7 @@ namespace HealthAutoArrange.Plugin
         private SortPlan _plan;
         private ReminderEngine _reminders;
         private readonly ReminderDispatcher _dispatcher;
-        private readonly Action<string> _log;
+        private readonly Action<LogLevel, string> _log;
         private readonly Action<ReminderMessage, ReminderRenderContext> _onReminder;
         private readonly MoodleCaptureRegistry _captures = new MoodleCaptureRegistry();
         private readonly StateObservationRegistry _observations = new StateObservationRegistry();
@@ -39,12 +40,13 @@ namespace HealthAutoArrange.Plugin
         private int _captureFloorSequence;
         private readonly Dictionary<int, int> _captureBoundaryByManager = new Dictionary<int, int>();
         private const float ReminderTickSeconds = 0.25f;
+        private readonly Dictionary<string, float> _lastErrorLogTime = new Dictionary<string, float>();
 
         public UnityUiAdapter(
             SortPlan plan,
             ReminderEngine reminders,
             ReminderDispatcher dispatcher,
-            Action<string> log,
+            Action<LogLevel, string> log,
             Action<ReminderMessage, ReminderRenderContext> onReminder = null)
         {
             _plan = plan ?? throw new ArgumentNullException(nameof(plan));
@@ -72,7 +74,7 @@ namespace HealthAutoArrange.Plugin
             }
             catch (Exception ex)
             {
-                _log?.Invoke($"State catalog refresh failed safely: {ex.Message}");
+                LogThrottled($"State catalog refresh failed safely: {ex.Message}");
             }
             return _observations.Snapshot();
         }
@@ -129,7 +131,7 @@ namespace HealthAutoArrange.Plugin
             }
             catch (Exception ex)
             {
-                _log?.Invoke($"AddMoodle capture failed: {ex.Message}");
+                LogThrottled($"AddMoodle capture failed: {ex.Message}");
             }
         }
 
@@ -214,7 +216,7 @@ namespace HealthAutoArrange.Plugin
             }
             catch (Exception ex)
             {
-                _log?.Invoke($"Moodle scan failed: {ex.Message}");
+                LogThrottled($"Moodle scan failed: {ex.Message}");
                 _scheduler.OnRefreshCompleted(canRunNow: false);
                 return;
             }
@@ -237,7 +239,7 @@ namespace HealthAutoArrange.Plugin
             }
             catch (Exception ex)
             {
-                _log?.Invoke($"Moodle sorting failed safely: {ex.Message}");
+                LogThrottled($"Moodle sorting failed safely: {ex.Message}");
             }
         }
 
@@ -248,14 +250,14 @@ namespace HealthAutoArrange.Plugin
         {
             try
             {
-                _log?.Invoke("===== HealthAutoArrange diagnostic dump =====");
-                _log?.Invoke($"Pending={_scheduler.HasPending}, Manager={(_manager != null ? _manager.name : "null")}");
+                _log?.Invoke(LogLevel.Info, "===== HealthAutoArrange diagnostic dump =====");
+                _log?.Invoke(LogLevel.Info, $"Pending={_scheduler.HasPending}, Manager={(_manager != null ? _manager.name : "null")}");
 
                 var visuals = _manager != null ? Scan(_manager) : new List<MoodleVisual>();
                 if (visuals.Count == 0)
                 {
-                    _log?.Invoke("No Moodle components currently found.");
-                    _log?.Invoke("===== end HealthAutoArrange dump =====");
+                    _log?.Invoke(LogLevel.Info, "No Moodle components currently found.");
+                    _log?.Invoke(LogLevel.Info, "===== end HealthAutoArrange dump =====");
                     return;
                 }
 
@@ -266,7 +268,7 @@ namespace HealthAutoArrange.Plugin
                     var diagnosticBaseId = capture != null && !string.IsNullOrWhiteSpace(capture.IconId)
                         ? MoodleIdentity.NormalizeRuntimeId(capture.IconId)
                         : MoodleIdentity.NormalizeRuntimeId(v.RuntimeId);
-                    _log?.Invoke("id=" + v.RuntimeId
+                    _log?.Invoke(LogLevel.Info, "id=" + v.RuntimeId
                         + " base=" + diagnosticBaseId
                         + " name='" + (capture != null ? capture.DisplayName : string.Empty) + "'"
                         + " row=" + (v.IsSide ? "side" : "main")
@@ -276,11 +278,11 @@ namespace HealthAutoArrange.Plugin
                         + " sibling=" + v.SiblingIndex
                         + " anchored=" + pos);
                 }
-                _log?.Invoke("===== end HealthAutoArrange dump =====");
+                _log?.Invoke(LogLevel.Info, "===== end HealthAutoArrange dump =====");
             }
             catch (Exception ex)
             {
-                _log?.Invoke($"Diagnostic dump failed: {ex.Message}");
+                LogThrottled($"Diagnostic dump failed: {ex.Message}");
             }
         }
 
@@ -297,7 +299,7 @@ namespace HealthAutoArrange.Plugin
             }
             catch (Exception ex)
             {
-                _log?.Invoke($"MoodleManager.moodles access failed: {ex.Message}");
+                LogThrottled($"MoodleManager.moodles access failed: {ex.Message}");
                 return result;
             }
             if (container == null) return result;
@@ -334,7 +336,7 @@ namespace HealthAutoArrange.Plugin
             }
             catch (Exception ex)
             {
-                _log?.Invoke($"Moodle child enumeration failed: {ex.Message}");
+                LogThrottled($"Moodle child enumeration failed: {ex.Message}");
             }
             return result;
         }
@@ -351,12 +353,28 @@ namespace HealthAutoArrange.Plugin
                 var parent = parentGroup.Key;
                 var members = parentGroup.ToList();
                 var mode = ResolveMode(parent, members);
-                if (mode == RenderMode.AnchoredPosition)
-                    ApplyAnchoredSlots(members);
-                else
-                    ApplySiblingOrder(parent, members);
-                _log?.Invoke($"Arranged {members.Count} moodles ({mode}).");
+                bool changed = mode == RenderMode.AnchoredPosition
+                    ? ApplyAnchoredSlots(members)
+                    : ApplySiblingOrder(parent, members);
+                // 仅实际写入布局时记录，且使用 Debug 级（默认不进 LogOutput.log），
+                // 避免游戏每帧重建图标导致的逐帧日志堆积。
+                if (changed)
+                {
+                    _log?.Invoke(LogLevel.Debug, $"Arranged {members.Count} moodles ({mode}).");
+                }
             }
+        }
+
+        /// <summary>
+        /// 异常日志节流：同一文本 5 秒内仅记录第一条，避免持续故障时逐帧刷屏；
+        /// 只作用于异常站点，F9 诊断 dump 不走此路径。
+        /// </summary>
+        private void LogThrottled(string message)
+        {
+            var now = Time.realtimeSinceStartup;
+            if (_lastErrorLogTime.TryGetValue(message, out var last) && now - last < 5f) return;
+            _lastErrorLogTime[message] = now;
+            _log?.Invoke(LogLevel.Warning, message);
         }
 
         private RenderMode ResolveMode(Transform parent, List<MoodleVisual> members)
@@ -399,7 +417,7 @@ namespace HealthAutoArrange.Plugin
         /// <summary>
         /// 行隔离的 sibling 重排：仅移动本行成员，保持另一行位置。
         /// </summary>
-        private void ApplySiblingOrder(Transform parent, List<MoodleVisual> members)
+        private bool ApplySiblingOrder(Transform parent, List<MoodleVisual> members)
         {
             var orders = PlanRows(members);
             var desiredChildren = new List<Transform>();
@@ -430,12 +448,13 @@ namespace HealthAutoArrange.Plugin
                     break;
                 }
             }
-            if (!changed) return;
+            if (!changed) return changed;
 
             for (int i = 0; i < desiredChildren.Count; i++)
             {
                 if (desiredChildren[i] != null) desiredChildren[i].SetSiblingIndex(i);
             }
+            return changed;
         }
 
         /// <summary>
@@ -443,8 +462,9 @@ namespace HealthAutoArrange.Plugin
         /// 槽位使用 AddMoodle 同帧已设置好的 x/y 位置；只写 x，保留 y
         /// （Moodle.Update 后续只影响 y 时不能重新覆盖 x）。
         /// </summary>
-        private void ApplyAnchoredSlots(List<MoodleVisual> members)
+        private bool ApplyAnchoredSlots(List<MoodleVisual> members)
         {
+            bool anyWrite = false;
             var orders = PlanRows(members);
             foreach (var kv in orders)
             {
@@ -462,9 +482,11 @@ namespace HealthAutoArrange.Plugin
                     if (Mathf.Abs(current.x - slot.x) > 0.001f)
                     {
                         target.RectTransform.anchoredPosition = new Vector2(slot.x, current.y);
+                        anyWrite = true;
                     }
                 }
             }
+            return anyWrite;
         }
 
         /// <summary>
@@ -527,7 +549,7 @@ namespace HealthAutoArrange.Plugin
             }
             catch (Exception ex)
             {
-                _log?.Invoke($"Reminder update failed: {ex.Message}");
+                LogThrottled($"Reminder update failed: {ex.Message}");
             }
         }
 

@@ -74,7 +74,7 @@ namespace HealthAutoArrange.Plugin
                 parseResult.Config.CreateSortPlan(),
                 reminders,
                 dispatcher,
-                msg => Logger.LogInfo(msg),
+                (level, msg) => Logger.Log(level, msg),
                 OnReminderMessage);
 
             // 4. rules 文件：首次无文件时从 ConfigFile 解析模型并写入；否则读取并应用。
