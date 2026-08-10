@@ -64,5 +64,34 @@ namespace HealthAutoArrange.Tests
             Assert.Equal(SortDispatchDecision.RunNow, decision);
             Assert.False(scheduler.HasPending);
         }
+
+        [Fact]
+        public void TryRunNow_ClearsPendingAndReturnsRunNow()
+        {
+            var scheduler = new SortScheduler();
+            scheduler.OnGameRefreshCompleted();
+            var decision = scheduler.TryRunNow();
+            Assert.Equal(SortDispatchDecision.RunNow, decision);
+            Assert.False(scheduler.HasPending);
+        }
+
+        [Fact]
+        public void TryRunNow_PendingFalseAfterCall()
+        {
+            var scheduler = new SortScheduler();
+            scheduler.OnRefreshCompleted(canRunNow: false);
+            Assert.True(scheduler.HasPending);
+            scheduler.TryRunNow();
+            Assert.False(scheduler.HasPending);
+        }
+
+        [Fact]
+        public void TryRunNow_ReturnsRunNowEvenWhenNoPending()
+        {
+            var scheduler = new SortScheduler();
+            var decision = scheduler.TryRunNow();
+            Assert.Equal(SortDispatchDecision.RunNow, decision);
+            Assert.False(scheduler.HasPending);
+        }
     }
 }

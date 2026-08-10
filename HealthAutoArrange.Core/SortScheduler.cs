@@ -55,5 +55,14 @@ namespace HealthAutoArrange.Core
             _pending = false;
             return true;
         }
+
+        /// <summary>
+        /// 同帧强制执行：清除任何挂起并返回 RunNow（游戏刷新后立即排序，避免下一帧等待）。
+        /// </summary>
+        public SortDispatchDecision TryRunNow()
+        {
+            _pending = false;
+            return SortDispatchDecision.RunNow;
+        }
     }
 }

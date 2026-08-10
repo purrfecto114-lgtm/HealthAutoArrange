@@ -163,7 +163,13 @@ namespace HealthAutoArrange.Plugin
             // 只有实际 UI 重排受主开关控制。
             if (_runtime.Enabled) _lastSignature = string.Empty;
 
-            _scheduler.OnGameRefreshCompleted();
+            // 同帧执行扫描/排序：postfix 仍在游戏刷新方法栈内，渲染发生在帧末，
+            // 此时 SetSiblingIndex 会在本帧渲染时生效，避免新图标先以默认顺序显示一帧（闪烁覆盖）。
+            // 失败路径（manager 为空/扫描异常）由 ProcessRefresh 内部重新安排到下一帧兜底。
+            if (_scheduler.TryRunNow() == SortDispatchDecision.RunNow)
+            {
+                ProcessRefresh();
+            }
         }
 
         /// <summary>
@@ -302,6 +308,9 @@ namespace HealthAutoArrange.Plugin
                 {
                     var child = container.GetChild(i);
                     if (child == null) continue;
+                    // 跳过非激活节点：游戏刷新帧内旧节点可能尚未销毁（Unity 延迟销毁），
+                    // 同帧排序时避免 ghost 节点参与排序/观察。
+                    if (!child.gameObject.activeInHierarchy) continue;
                     var moodle = child.GetComponent<Moodle>();
                     if (moodle == null) continue;
 
