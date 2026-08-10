@@ -18,7 +18,7 @@ namespace HealthAutoArrange.Plugin
     /// BepInEx 的 com.healthautoarrange.plugin.cfg 仅保留默认模板与热键，用于兼容。
     /// 补丁目标缺失或任何初始化失败时仅记录警告，不阻塞游戏启动。
     /// </summary>
-    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.1.3")]
+    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.1.5")]
     public class Plugin : BaseUnityPlugin,
         IFallbackSettingsActions,
         IFallbackSettingsStateActions,
