@@ -14,6 +14,7 @@ jobs:
     runs-on: windows-latest
     env:
       GAME_REFS_URL: ${{ secrets.GAME_REFS_URL }}
+      UPDATE_SIGNING_PRIVATE_KEY_PEM: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY_PEM }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -24,7 +25,10 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Static smoke
-        run: python3 tools/static_smoke.py
+        run: python tools/static_smoke.py
+
+      - name: Validate updater trust key
+        run: python tools/update_key_check.py
 
       - name: Validate release version
         shell: pwsh
@@ -43,6 +47,15 @@ jobs:
             throw "Secret GAME_REFS_URL is not configured. Set it to a private URL pointing to the game reference archive before running this workflow."
           }
           Write-Host "GAME_REFS_URL is configured."
+
+      - name: Validate update signing key
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:UPDATE_SIGNING_PRIVATE_KEY_PEM)) {
+            throw "Secret UPDATE_SIGNING_PRIVATE_KEY_PEM is required for tagged releases. Use the private key matching update/TRUSTED_UPDATE_PUBLIC_KEY.pem."
+          }
+          Write-Host "Update signing key is configured."
 
       - name: Download and extract game references
         shell: pwsh
@@ -75,9 +88,66 @@ jobs:
           }
           $zipPath = Join-Path $env:RUNNER_TEMP "HealthAutoArrange-$version.zip"
           Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zipPath
+          if ((Get-Item $zipPath).Length -gt 16MB) { throw "Release package exceeds updater safety limit (16 MiB)." }
           Write-Host "Package=$zipPath"
           Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_ZIP=$zipPath"
           Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_VERSION=$version"
+
+      - name: Build signed update manifest
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $asset = Split-Path -Leaf $env:RELEASE_ZIP
+          $sha = (Get-FileHash -Algorithm SHA256 $env:RELEASE_ZIP).Hash.ToLowerInvariant()
+          $size = (Get-Item $env:RELEASE_ZIP).Length
+          $repo = $env:GITHUB_REPOSITORY
+          $tag = $env:GITHUB_REF_NAME
+          $officialUrl = "https://github.com/$repo/releases/download/$tag/$asset"
+          $mirrorUrl = "https://cdn.jsdelivr.net/gh/$repo@update-dist/packages/$($env:RELEASE_VERSION)/$asset"
+          $notesUrl = "https://github.com/$repo/releases/tag/$tag"
+          $publishedUtc = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+          $canonical = @(
+            'schema=1'
+            'keyId=haa-rsa-2026-01'
+            "version=$($env:RELEASE_VERSION)"
+            "assetName=$asset"
+            "sha256=$sha"
+            "size=$size"
+            "officialUrl=$officialUrl"
+            "mirrorUrl=$mirrorUrl"
+            "notesUrl=$notesUrl"
+            "publishedUtc=$publishedUtc"
+          ) -join "`n"
+
+          $rsa = [System.Security.Cryptography.RSA]::Create()
+          try {
+            $rsa.ImportFromPem($env:UPDATE_SIGNING_PRIVATE_KEY_PEM)
+            $signatureBytes = $rsa.SignData(
+              [Text.Encoding]::UTF8.GetBytes($canonical),
+              [Security.Cryptography.HashAlgorithmName]::SHA256,
+              [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+          } finally {
+            $rsa.Dispose()
+          }
+          $publicRsa = [System.Security.Cryptography.RSA]::Create()
+          try {
+            $publicPem = [IO.File]::ReadAllText('update/TRUSTED_UPDATE_PUBLIC_KEY.pem')
+            $publicRsa.ImportFromPem($publicPem)
+            $verified = $publicRsa.VerifyData(
+              [Text.Encoding]::UTF8.GetBytes($canonical),
+              $signatureBytes,
+              [Security.Cryptography.HashAlgorithmName]::SHA256,
+              [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+            if (-not $verified) { throw "UPDATE_SIGNING_PRIVATE_KEY_PEM does not match the shipped updater public key." }
+          } finally {
+            $publicRsa.Dispose()
+          }
+
+          $manifest = $canonical + "`nsignature=" + [Convert]::ToBase64String($signatureBytes) + "`n"
+          $manifestPath = Join-Path $env:RUNNER_TEMP 'latest.txt'
+          [IO.File]::WriteAllText($manifestPath, $manifest, [Text.UTF8Encoding]::new($false))
+          Add-Content -Path $env:GITHUB_ENV -Value "UPDATE_MANIFEST=$manifestPath"
+          Write-Host "Signed update manifest generated."
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -89,5 +159,42 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.RELEASE_ZIP }}
+          files: |
+            ${{ env.RELEASE_ZIP }}
+            ${{ env.UPDATE_MANIFEST }}
           generate_release_notes: true
+
+      - name: Publish signed CDN mirror branch
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $mirrorDir = Join-Path $env:RUNNER_TEMP 'update-dist'
+          if (Test-Path $mirrorDir) { Remove-Item -Recurse -Force $mirrorDir }
+          $repoUrl = "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git"
+          git clone --depth 1 --branch update-dist $repoUrl $mirrorDir
+          if ($LASTEXITCODE -ne 0) {
+            if (Test-Path $mirrorDir) { Remove-Item -Recurse -Force $mirrorDir }
+            git clone --depth 1 $repoUrl $mirrorDir
+            if ($LASTEXITCODE -ne 0) { throw "Could not clone repository for update-dist branch." }
+            Push-Location $mirrorDir
+            git checkout --orphan update-dist
+            git rm -rf . 2>$null
+            Pop-Location
+          }
+
+          $packageDir = Join-Path $mirrorDir "packages/$($env:RELEASE_VERSION)"
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          Copy-Item $env:RELEASE_ZIP (Join-Path $packageDir (Split-Path -Leaf $env:RELEASE_ZIP)) -Force
+          Copy-Item $env:UPDATE_MANIFEST (Join-Path $mirrorDir 'latest.txt') -Force
+
+          Push-Location $mirrorDir
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add latest.txt packages
+          git commit -m "update: publish v$($env:RELEASE_VERSION)"
+          if ($LASTEXITCODE -ne 0) { Write-Host 'No mirror changes to commit.' }
+          git push origin HEAD:update-dist
+          if ($LASTEXITCODE -ne 0) { throw "Could not publish update-dist branch." }
+          Pop-Location

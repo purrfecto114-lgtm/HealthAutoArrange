@@ -48,5 +48,17 @@ namespace HealthAutoArrange.Tests
             Assert.Equal("选择状态", zh.SelectState);
             Assert.Equal("Select state", en.SelectState);
         }
+
+        [Fact]
+        public void UpdateLabelsExposeSafetyAndAvailabilityWithoutOpeningAdvancedSection()
+        {
+            var zh = UiTextCatalog.ForLanguage(true);
+            var en = UiTextCatalog.ForLanguage(false);
+            Assert.Contains("1.1.7", zh.UpdateBadge("1.1.7"));
+            Assert.Contains("1.1.7", en.UpdateBadge("1.1.7"));
+            Assert.Contains("RSA", zh.UpdateSecurityHelp);
+            Assert.Contains("SHA-256", en.UpdateSecurityHelp);
+            Assert.Contains("不会", zh.UpdateInstallNote);
+        }
     }
 }

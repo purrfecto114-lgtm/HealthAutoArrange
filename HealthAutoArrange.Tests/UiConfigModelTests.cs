@@ -96,5 +96,29 @@ namespace HealthAutoArrange.Tests
             Assert.Equal(1, text.Split(new[] { "Group.Group.States" }, System.StringSplitOptions.None).Length - 1);
             Assert.Contains("Group.Group.States = first", text);
         }
+
+        [Fact]
+        public void CloneCreatesIndependentEditableSnapshot()
+        {
+            var model = new UiConfigModel { Enabled = true, GroupOrder = new List<string> { "A" } };
+            model.Groups.Add(new UiGroupModel("A", "bleeding#"));
+            var reminder = new UiReminderModel("bleeding#", true, ReminderMode.BottomAlert, ReminderRepeatMode.Once, 30d, 1);
+            reminder.Template = "{name}";
+            reminder.Placement = ReminderPlacements.Custom(0.25f, 0.75f, 10f, -20f);
+            model.Reminders.Add(reminder);
+
+            var clone = model.Clone();
+            clone.Enabled = false;
+            clone.GroupOrder[0] = "B";
+            clone.Groups[0].Name = "B";
+            clone.Reminders[0].Template = "changed";
+            clone.Reminders[0].Placement = ReminderPlacements.Center();
+
+            Assert.True(model.Enabled);
+            Assert.Equal("A", model.GroupOrder[0]);
+            Assert.Equal("A", model.Groups[0].Name);
+            Assert.Equal("{name}", model.Reminders[0].Template);
+            Assert.Equal(ReminderPlacementPreset.Custom, model.Reminders[0].Placement.Preset);
+        }
     }
 }

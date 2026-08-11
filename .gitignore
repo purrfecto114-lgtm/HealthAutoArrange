@@ -36,3 +36,6 @@ Assembly-CSharp.dll
 UnityEngine*.dll
 BepInEx.dll
 0Harmony.dll
+
+# Local update signing material (never commit)
+*update-signing-private*.pem

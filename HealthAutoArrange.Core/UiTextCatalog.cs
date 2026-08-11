@@ -73,6 +73,30 @@ namespace HealthAutoArrange.Core
         public string DiagnosticsWritten => _chinese ? "HealthAutoArrange 诊断已写入 LogOutput.log" : "HealthAutoArrange diagnostics written to LogOutput.log";
         public string PriorityGroupPrefix => _chinese ? "优先级 " : "Priority ";
         public string NewGroup => _chinese ? "新分组" : "New group";
+        public string Discard => _chinese ? "丢弃修改" : "Discard";
+        public string Cancel => _chinese ? "取消" : "Cancel";
+        public string SaveSucceeded => _chinese ? "设置已保存并应用。" : "Settings saved and applied.";
+        public string SaveMemoryOnly => _chinese ? "设置已应用到本次游戏，但写入磁盘失败；仍标记为未保存。" : "Settings were applied for this session, but disk save failed; changes remain marked unsaved.";
+        public string SaveDiskOnly => _chinese ? "设置已写入磁盘，但运行时应用失败；建议重载或重启游戏，当前仍标记为需要确认。" : "Settings were written to disk but runtime apply failed; reload or restart is recommended, and the UI remains marked for attention.";
+        public string SaveFailed => _chinese ? "设置未能应用：" : "Settings could not be applied:";
+        public string ReloadSucceeded => _chinese ? "已从磁盘重载设置。" : "Settings reloaded from disk.";
+        public string ReloadFailed => _chinese ? "无法从磁盘重载设置；当前编辑内容已保留。" : "Could not reload settings from disk; current edits were kept.";
+        public string UnsavedClosePrompt => _chinese ? "还有未保存修改。关闭前要保存，还是丢弃并恢复磁盘配置？" : "You have unsaved changes. Save before closing, or discard them and restore the on-disk settings?";
+        public string UnsavedReloadPrompt => _chinese ? "重载会丢弃当前未保存修改。继续吗？" : "Reloading will discard current unsaved changes. Continue?";
+        public string Updates => _chinese ? "版本与更新" : "Version & updates";
+        public string AutoCheckUpdates => _chinese ? "启动后自动检查更新（只检查，不自动安装）" : "Check for updates after startup (check only; never auto-install)";
+        public string AllowUpdateMirror => _chinese ? "允许 CDN 镜像回退（国内网络可尝试）" : "Allow CDN mirror fallback (useful on restricted routes)";
+        public string CurrentVersion => _chinese ? "当前版本" : "Current version";
+        public string LatestVersion => _chinese ? "最新版本" : "Latest version";
+        public string CheckUpdates => _chinese ? "检查更新" : "Check now";
+        public string DownloadVerifiedUpdate => _chinese ? "下载并校验" : "Download & verify";
+        public string ReleaseNotes => _chinese ? "版本说明" : "Release notes";
+        public string UpdateBadge(string version) => _chinese ? "可更新 " + version : "Update " + version;
+        public string DownloadProgress => _chinese ? "下载进度" : "Download progress";
+        public string UpdateDownloadedPath => _chinese ? "已校验更新包位置：" : "Verified update package:";
+        public string UpdaterUnavailable => _chinese ? "当前运行环境未启用更新器。" : "Updater is not available in this runtime.";
+        public string UpdateInstallNote => _chinese ? "安全策略：更新器不会在游戏运行时替换 DLL。下载完成并通过签名/哈希校验后，请退出游戏再手动替换。" : "Safety policy: the updater never replaces loaded DLLs. After the package is downloaded and signature/hash verified, exit the game before replacing files manually.";
+        public string UpdateSecurityHelp => _chinese ? "同时尝试官方源与可选 CDN 镜像；镜像本身不被视为可信。清单必须通过内置 RSA 公钥验证，下载包还必须匹配清单中的 SHA-256 和大小。不会执行下载内容，也不会热替换 DLL。" : "Checks the official source and optional CDN mirror. The mirror itself is not trusted: the manifest must verify against the pinned RSA public key, and the package must match the signed SHA-256 and size. Downloaded content is never executed and loaded DLLs are never hot-replaced.";
 
         public string EnabledHelp => _chinese
             ? "只控制游戏已创建 Moodle 图标的排序；不会改变伤病判定、严重度、脑芯片可见性或主/侧状态栏规则。状态提醒有各自的开关，关闭排序不会静默关闭提醒。"
@@ -105,6 +129,20 @@ namespace HealthAutoArrange.Core
         public string TargetGroupHelp => _chinese
             ? "点右侧按钮循环选择目标分组，再用“加入/移动”分配状态。修改只在“保存并应用”后写入规则文件。"
             : "Cycle the target group with the button, then assign or move states. Changes are written only after Save & apply.";
+
+        public string UpdateState(UpdateUiState state)
+        {
+            switch (state)
+            {
+                case UpdateUiState.Checking: return _chinese ? "状态：正在检查…" : "Status: checking…";
+                case UpdateUiState.UpToDate: return _chinese ? "状态：已是最新版本" : "Status: up to date";
+                case UpdateUiState.Available: return _chinese ? "状态：发现可用更新" : "Status: update available";
+                case UpdateUiState.Downloading: return _chinese ? "状态：正在下载并校验…" : "Status: downloading and verifying…";
+                case UpdateUiState.Downloaded: return _chinese ? "状态：更新包已下载并校验" : "Status: verified package downloaded";
+                case UpdateUiState.Failed: return _chinese ? "状态：更新检查/下载失败" : "Status: update check/download failed";
+                default: return _chinese ? "状态：尚未检查" : "Status: not checked yet";
+            }
+        }
 
         public string StateTechnicalHelp(StateCatalogEntry entry)
         {

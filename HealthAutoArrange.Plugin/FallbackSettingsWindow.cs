@@ -17,6 +17,37 @@ namespace HealthAutoArrange.Plugin
         void Close();
     }
 
+    public sealed class SettingsSaveResult
+    {
+        public bool Applied { get; }
+        public bool Persisted { get; }
+        public string Detail { get; }
+
+        public SettingsSaveResult(bool applied, bool persisted, string detail)
+        {
+            Applied = applied;
+            Persisted = persisted;
+            Detail = detail ?? string.Empty;
+        }
+    }
+
+    /// <summary>Optional richer persistence feedback used by the built-in UI.</summary>
+    public interface IFallbackSettingsPersistenceActions
+    {
+        SettingsSaveResult SaveWithResult(UiConfigModel model);
+    }
+
+    /// <summary>Optional safe update controls. Downloads are staged only; never hot-installed.</summary>
+    public interface IFallbackSettingsUpdateActions
+    {
+        UpdateUiSnapshot GetUpdateStatus();
+        void CheckForUpdates();
+        void DownloadUpdate();
+        void OpenUpdatePage();
+        bool AutoCheckUpdates { get; set; }
+        bool AllowUpdateMirror { get; set; }
+    }
+
     /// <summary>可选的状态目录刷新能力，不破坏既有宿主回调接口。</summary>
     public interface IFallbackSettingsStateActions
     {
@@ -62,8 +93,17 @@ namespace HealthAutoArrange.Plugin
         private bool _advancedTextEditing;
         private bool _showAdvanced;
         private bool _showReminders;
+        private bool _showUpdates;
         private bool _dirty;
+        private PendingDestructiveAction _pendingDestructiveAction;
         private string _stateMessage = string.Empty;
+
+        private enum PendingDestructiveAction
+        {
+            None = 0,
+            Close = 1,
+            Reload = 2
+        }
         private readonly Dictionary<UiReminderModel, Dictionary<string, NumericTextBuffer>> _numericBuffers
             = new Dictionary<UiReminderModel, Dictionary<string, NumericTextBuffer>>();
 
@@ -143,6 +183,17 @@ namespace HealthAutoArrange.Plugin
         public void Close()
         {
             if (!_open) return;
+            if (_dirty)
+            {
+                _pendingDestructiveAction = PendingDestructiveAction.Close;
+                return;
+            }
+            CloseImmediately();
+        }
+
+        private void CloseImmediately()
+        {
+            _pendingDestructiveAction = PendingDestructiveAction.None;
             _open = false;
             _actions.Close();
         }
@@ -177,7 +228,14 @@ namespace HealthAutoArrange.Plugin
         {
             GUILayout.BeginVertical();
             GUILayout.BeginHorizontal();
-            GUILayout.FlexibleSpace();
+            var updateActions = _actions as IFallbackSettingsUpdateActions;
+            var headerUpdate = updateActions?.GetUpdateStatus();
+            GUILayout.Label(headerUpdate == null ? "Health Auto Arrange" : "Health Auto Arrange  v" + headerUpdate.CurrentVersion, GUILayout.ExpandWidth(true), GUILayout.Height(26f));
+            if (headerUpdate != null && headerUpdate.HasUpdate && !string.IsNullOrWhiteSpace(headerUpdate.LatestVersion))
+            {
+                if (GUILayout.Button(_text.UpdateBadge(headerUpdate.LatestVersion), GUILayout.Width(IsNarrowLayout() ? 108f : 126f), GUILayout.Height(26f)))
+                    _showUpdates = true;
+            }
             if (GUILayout.Button(new GUIContent(_text.LanguageButton, _text.LanguageHelp), GUILayout.Width(76f), GUILayout.Height(26f)))
             {
                 SetLanguage(!_text.IsChinese);
@@ -230,31 +288,22 @@ namespace HealthAutoArrange.Plugin
                 }
             }
 
+            GUILayout.Space(10f);
+            if (GUILayout.Button((_showUpdates ? "▼ " : "▶ ") + _text.Updates, GUILayout.Height(30f)))
+                _showUpdates = !_showUpdates;
+            if (_showUpdates) DrawUpdates();
+
             GUILayout.EndScrollView();
             GUILayout.Space(6f);
+            if (!string.IsNullOrEmpty(_stateMessage)) GUILayout.Label(_stateMessage);
             if (_dirty) GUILayout.Label("• " + _text.Unsaved);
+            DrawPendingDestructivePrompt();
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button(_text.Save, GUILayout.Width(118f), GUILayout.Height(32f)))
+            if (GUILayout.Button(_text.Save, GUILayout.Width(IsNarrowLayout() ? 108f : 132f), GUILayout.Height(32f))) SaveChanges();
+            if (GUILayout.Button(_text.Reload, GUILayout.Width(IsNarrowLayout() ? 118f : 148f), GUILayout.Height(32f)))
             {
-                CommitPendingNumericFields();
-                ApplySelectionToModel();
-                SyncGroupOrderFromGroups();
-                _model.Normalize();
-                _actions.Save(_model);
-                _selectionEditor = _model.CreateSelectionEditor();
-                _dirty = false;
-            }
-            if (GUILayout.Button(_text.Reload, GUILayout.Width(148f), GUILayout.Height(32f)))
-            {
-                var loaded = _actions.Reload();
-                if (loaded != null)
-                {
-                    _model = loaded;
-                    _selectionEditor = _model.CreateSelectionEditor();
-                    _numericBuffers.Clear();
-                    _dirty = false;
-                    _stateMessage = string.Empty;
-                }
+                if (_dirty) _pendingDestructiveAction = PendingDestructiveAction.Reload;
+                else ReloadFromDisk();
             }
             if (GUILayout.Button(_text.Close, GUILayout.Width(88f), GUILayout.Height(32f))) Close();
             GUILayout.EndHorizontal();
@@ -262,6 +311,142 @@ namespace HealthAutoArrange.Plugin
 
             DrawTooltipOverlay();
             GUI.DragWindow(new Rect(0f, 0f, 10000f, 24f));
+        }
+
+        private void SaveChanges()
+        {
+            CommitPendingNumericFields();
+            ApplySelectionToModel();
+            SyncGroupOrderFromGroups();
+            _model.Normalize();
+
+            var persistence = _actions as IFallbackSettingsPersistenceActions;
+            if (persistence != null)
+            {
+                var result = persistence.SaveWithResult(_model);
+                if (result.Applied)
+                    _selectionEditor = _model.CreateSelectionEditor();
+                if (result.Persisted && result.Applied)
+                {
+                    _dirty = false;
+                    _stateMessage = _text.SaveSucceeded;
+                    _pendingDestructiveAction = PendingDestructiveAction.None;
+                }
+                else if (result.Applied)
+                {
+                    _dirty = true;
+                    _stateMessage = _text.SaveMemoryOnly + (string.IsNullOrWhiteSpace(result.Detail) ? string.Empty : " " + result.Detail);
+                }
+                else if (result.Persisted)
+                {
+                    _dirty = true;
+                    _stateMessage = _text.SaveDiskOnly + (string.IsNullOrWhiteSpace(result.Detail) ? string.Empty : " " + result.Detail);
+                }
+                else
+                {
+                    _dirty = true;
+                    _stateMessage = _text.SaveFailed + (string.IsNullOrWhiteSpace(result.Detail) ? string.Empty : " " + result.Detail);
+                }
+                return;
+            }
+
+            _actions.Save(_model);
+            _selectionEditor = _model.CreateSelectionEditor();
+            _dirty = false;
+            _stateMessage = _text.SaveSucceeded;
+            _pendingDestructiveAction = PendingDestructiveAction.None;
+        }
+
+        private bool ReloadFromDisk()
+        {
+            var loaded = _actions.Reload();
+            if (loaded == null)
+            {
+                _stateMessage = _text.ReloadFailed;
+                return false;
+            }
+            _model = loaded;
+            _selectionEditor = _model.CreateSelectionEditor();
+            _numericBuffers.Clear();
+            _dirty = false;
+            _stateMessage = _text.ReloadSucceeded;
+            _pendingDestructiveAction = PendingDestructiveAction.None;
+            return true;
+        }
+
+        private void DrawPendingDestructivePrompt()
+        {
+            if (_pendingDestructiveAction == PendingDestructiveAction.None) return;
+            GUILayout.BeginVertical(GUI.skin.box);
+            GUILayout.Label(_pendingDestructiveAction == PendingDestructiveAction.Close
+                ? _text.UnsavedClosePrompt
+                : _text.UnsavedReloadPrompt);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(_text.Save, GUILayout.Height(30f)))
+            {
+                var action = _pendingDestructiveAction;
+                SaveChanges();
+                if (!_dirty)
+                {
+                    if (action == PendingDestructiveAction.Close) CloseImmediately();
+                    else if (action == PendingDestructiveAction.Reload) ReloadFromDisk();
+                }
+            }
+            if (GUILayout.Button(_text.Discard, GUILayout.Height(30f)))
+            {
+                var action = _pendingDestructiveAction;
+                if (ReloadFromDisk() && action == PendingDestructiveAction.Close) CloseImmediately();
+            }
+            if (GUILayout.Button(_text.Cancel, GUILayout.Height(30f)))
+                _pendingDestructiveAction = PendingDestructiveAction.None;
+            GUILayout.EndHorizontal();
+            GUILayout.EndVertical();
+        }
+
+        private void DrawUpdates()
+        {
+            var updateActions = _actions as IFallbackSettingsUpdateActions;
+            if (updateActions == null)
+            {
+                GUILayout.Label(_text.UpdaterUnavailable);
+                return;
+            }
+
+            DrawSectionHeader(_text.Updates, _text.UpdateSecurityHelp);
+            var autoCheck = GUILayout.Toggle(updateActions.AutoCheckUpdates, _text.AutoCheckUpdates, GUILayout.Height(24f));
+            if (autoCheck != updateActions.AutoCheckUpdates) updateActions.AutoCheckUpdates = autoCheck;
+            var allowMirror = GUILayout.Toggle(updateActions.AllowUpdateMirror, _text.AllowUpdateMirror, GUILayout.Height(24f));
+            if (allowMirror != updateActions.AllowUpdateMirror) updateActions.AllowUpdateMirror = allowMirror;
+
+            var snapshot = updateActions.GetUpdateStatus();
+            GUILayout.Label(_text.CurrentVersion + ": " + snapshot.CurrentVersion);
+            if (!string.IsNullOrWhiteSpace(snapshot.LatestVersion))
+                GUILayout.Label(_text.LatestVersion + ": " + snapshot.LatestVersion);
+            GUILayout.Label(_text.UpdateState(snapshot.State));
+            if (snapshot.State == UpdateUiState.Downloading)
+                GUILayout.Label(_text.DownloadProgress + ": " + Mathf.RoundToInt(snapshot.Progress01 * 100f) + "%");
+            if (!string.IsNullOrWhiteSpace(snapshot.Detail))
+            {
+                var detailStyle = new GUIStyle(GUI.skin.label) { wordWrap = true };
+                GUILayout.Label(snapshot.Detail, detailStyle, GUILayout.ExpandWidth(true));
+            }
+            if (!string.IsNullOrWhiteSpace(snapshot.DownloadedPath))
+            {
+                GUILayout.Label(_text.UpdateDownloadedPath);
+                GUILayout.TextField(snapshot.DownloadedPath, GUILayout.ExpandWidth(true));
+            }
+
+            GUILayout.BeginHorizontal();
+            GUI.enabled = snapshot.CanCheck;
+            if (GUILayout.Button(_text.CheckUpdates, GUILayout.Height(30f))) updateActions.CheckForUpdates();
+            GUI.enabled = snapshot.CanDownload;
+            if (GUILayout.Button(_text.DownloadVerifiedUpdate, GUILayout.Height(30f))) updateActions.DownloadUpdate();
+            GUILayout.EndHorizontal();
+            GUI.enabled = snapshot.HasUpdate;
+            if (GUILayout.Button(_text.ReleaseNotes, GUILayout.Height(30f), GUILayout.ExpandWidth(true))) updateActions.OpenUpdatePage();
+            GUI.enabled = true;
+            var noteStyle = new GUIStyle(GUI.skin.label) { wordWrap = true };
+            GUILayout.Label(_text.UpdateInstallNote, noteStyle, GUILayout.ExpandWidth(true));
         }
 
         private void DrawGroups()
@@ -458,7 +643,6 @@ namespace HealthAutoArrange.Plugin
                 GUILayout.EndHorizontal();
             }
             if (_stateCatalog.Count == 0) GUILayout.Label(_text.NoStates);
-            if (!string.IsNullOrEmpty(_stateMessage)) GUILayout.Label(_stateMessage);
         }
 
         private GroupSelection FindAssignedGroup(string baseId)
@@ -927,8 +1111,13 @@ namespace HealthAutoArrange.Plugin
 
         private void DrawSectionHeader(string title, string help)
         {
+            var style = new GUIStyle(GUI.skin.label)
+            {
+                fontStyle = FontStyle.Bold,
+                alignment = TextAnchor.MiddleLeft
+            };
             GUILayout.BeginHorizontal();
-            GUILayout.Label(title, GUILayout.ExpandWidth(true));
+            GUILayout.Label(title, style, GUILayout.ExpandWidth(true), GUILayout.Height(24f));
             DrawInfoButton(help);
             GUILayout.EndHorizontal();
         }
@@ -962,7 +1151,8 @@ namespace HealthAutoArrange.Plugin
             var width = Mathf.Min(460f, Mathf.Max(220f, _windowRect.width - 24f));
             var content = new GUIContent(GUI.tooltip);
             var height = Mathf.Min(170f, style.CalcHeight(content, width));
-            GUI.Box(new Rect(12f, Mathf.Max(30f, _windowRect.height - height - 14f), width, height), content, style);
+            // Keep help overlays away from the fixed footer and destructive-action prompt.
+            GUI.Box(new Rect(12f, 32f, width, height), content, style);
         }
 
         private bool IsNarrowLayout()

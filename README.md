@@ -1,4 +1,4 @@
-# HealthAutoArrange
+# HealthAutoArrange 1.1.6
 
 一个可以把 Casualties: Unknown（游戏）里的状态图标（Moodles）按自定义规则自动整理，并可在本地显示可配置状态提醒的 Mod。它不修改生命值、状态触发条件或网络同步数据；但会修改客户端 Moodle UI 排列、绘制本地提醒，并在 F8 设置窗口打开时让游戏把指针视为位于 UI 上以阻止误攻击/交互。
 
@@ -20,14 +20,27 @@
   - 查看“状态目录”（仅显示本次游戏观察到的状态），将状态加入分组或调整顺序
   - 配置或预览提醒（reminders）
   - 切换界面语言（右上角 EN / 中文）
+  - 在“版本与更新”中检查更新；更新器只下载并校验，不会在游戏运行时替换 DLL
 - F9：将当前 Moodle 诊断输出到 `BepInEx/LogOutput.log`（用于反馈问题时的诊断信息）
 - 配置会写入规则文件：`BepInEx/config/com.healthautoarrange.plugin.rules.cfg`（点击“保存并应用”会写入）
+- 1.1.6 起，未保存修改在关闭/重载前会要求“保存 / 丢弃 / 取消”；磁盘保存失败不会清除“未保存”标记。
 
 默认行为要点：
 - 未识别的新状态默认为 “Keep”（保留原位），不会被自动移到末尾，以避免误分类。
 - 自动整理只改变 Moodle UI 的客户端排列；提醒 overlay 也仅在本地绘制。
 - F8 设置窗口打开时，插件会把 `UIUtil.IsPointerOverUIElement()` 的最终结果提升为 `true`，用于阻止拖动设置窗口时触发游戏攻击/交互；窗口关闭后保留游戏原判断。
 - 插件不写入生命/伤势等游戏数值，不改变状态触发条件，也不修改网络同步数据。
+
+## 1.1.6 安全更新器
+
+- 默认启动约 10 秒后进行一次**只读更新检查**；可在 F8 →“版本与更新”关闭。
+- 同时支持官方 GitHub manifest 与可选 CDN mirror。两条网络路径都可能因地区、ISP 或平台策略暂时不可达，因此实现的是多源回退而不是“任何网络下 100% 可用”的承诺。
+- CDN/镜像**不作为信任根**：`latest.txt` 必须通过插件内置 RSA 公钥验证；更新 ZIP 还必须同时匹配签名 manifest 中的 SHA-256 与字节大小。
+- 下载内容只会保存到 `BepInEx/config/HealthAutoArrange/updates/`。插件不会解压执行它，也不会在游戏运行时覆盖已加载 DLL。退出游戏后再手动替换。
+- 默认镜像 manifest 使用 jsDelivr；如果特定国内网络访问不稳定，可以在 BepInEx 配置的 `[Updates] MirrorManifestUrl` 指向维护者自己的 GitCode/Gitee/对象存储镜像。镜像只要保持 `latest.txt` 与 `packages/<version>/<asset>` 的目录结构，客户端在该 manifest 验签通过后会优先从**同一镜像来源**取包，再用签名清单里的 SHA-256 与大小验真。manifest 仍必须由同一私钥签名。
+- 可完全关闭 `AutoCheck` 或 `AllowMirror`。更新检查会向所选源发送普通 HTTPS GET，因此也会像访问任何网站一样向服务端暴露网络 IP。
+
+发布维护者请阅读 `update/README.md`。带 tag 的 Release 需要 GitHub Secret `UPDATE_SIGNING_PRIVATE_KEY_PEM`，其私钥必须与仓库中的 `update/TRUSTED_UPDATE_PUBLIC_KEY.pem` 匹配。
 
 ## 常见问题（FAQ）
 Q: 插件放好了但没有生效？
@@ -51,6 +64,7 @@ A: 在 Issues 中请尽量包含：
 ## 界面与设置速览
 - 主界面四项：自动整理开关、未识别状态策略、分组优先级（可上下移动）、状态目录（仅显示实际观察到的状态）。
 - “高级设置”默认折叠：包括手动编辑 ID、立即重排、输出诊断、提醒高级选项等；普通玩家通常不需要修改这些。
+- “版本与更新”独立折叠，不和提醒/诊断混在一起；窗口顶部显示当前 Mod 版本，底部的保存/重载/关闭操作始终固定在滚动区域之外。
 
 ---
 

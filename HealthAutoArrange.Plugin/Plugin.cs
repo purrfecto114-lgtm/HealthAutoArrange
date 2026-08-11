@@ -19,12 +19,14 @@ namespace HealthAutoArrange.Plugin
     /// 单个可选补丁目标缺失时降级并记录；运行期可捕获的托管异常尽量隔离。
     /// 不宣称能够吞掉 Unity 原生层故障，也不把 ABI/依赖不匹配伪装成“安全可继续”。
     /// </summary>
-    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.1.5")]
+    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.1.6")]
     public class Plugin : BaseUnityPlugin,
         IFallbackSettingsActions,
         IFallbackSettingsStateActions,
         IFallbackSettingsPreviewActions,
-        IFallbackSettingsLanguageActions
+        IFallbackSettingsLanguageActions,
+        IFallbackSettingsPersistenceActions,
+        IFallbackSettingsUpdateActions
     {
         internal static ManualLogSource PluginLog;
         internal static UnityUiAdapter Adapter;
@@ -43,6 +45,11 @@ namespace HealthAutoArrange.Plugin
         private ConfigEntry<KeyCode> _settingsKey;
         private ConfigEntry<KeyCode> _debugDumpKey;
         private ConfigEntry<string> _uiLanguage;
+        private ConfigEntry<bool> _autoCheckUpdates;
+        private ConfigEntry<bool> _allowUpdateMirror;
+        private ConfigEntry<string> _officialManifestUrl;
+        private ConfigEntry<string> _mirrorManifestUrl;
+        private SafeUpdater _updater;
 
         private void Awake()
         {
@@ -67,6 +74,7 @@ namespace HealthAutoArrange.Plugin
                 _overlay = null;
                 _presentation = null;
                 _harmony = null;
+                _updater = null;
                 enabled = false;
             }
         }
@@ -83,6 +91,16 @@ namespace HealthAutoArrange.Plugin
                 "Key to dump current Moodle diagnostics to the log.");
             _uiLanguage = Config.Bind("UI", "Language", "Auto",
                 "Settings GUI language: Auto, Chinese, or English. The in-game button writes Chinese/English here.");
+            _autoCheckUpdates = Config.Bind("Updates", "AutoCheck", true,
+                "Check for a signed stable update shortly after startup. This never installs or replaces DLLs automatically.");
+            _allowUpdateMirror = Config.Bind("Updates", "AllowMirror", true,
+                "Allow the signed CDN manifest/package mirror as a fallback when the official GitHub route is unavailable.");
+            _officialManifestUrl = Config.Bind("Updates", "OfficialManifestUrl",
+                "https://raw.githubusercontent.com/purrfecto114-lgtm/HealthAutoArrange/update-dist/latest.txt",
+                "Official signed update manifest. HTTPS only.");
+            _mirrorManifestUrl = Config.Bind("Updates", "MirrorManifestUrl",
+                "https://cdn.jsdelivr.net/gh/purrfecto114-lgtm/HealthAutoArrange@update-dist/latest.txt",
+                "Optional signed mirror manifest. The mirror is never trusted without RSA signature verification.");
             var chineseUi = ResolveChineseUiLanguage();
 
             // 2. 读取 BepInEx 配置（默认模板 + 兼容解析）
@@ -110,10 +128,22 @@ namespace HealthAutoArrange.Plugin
             _uiModel = LoadRulesModel(parseResult.Config);
             ApplyModel(_uiModel);
 
-            // 5. F8 设置窗口（不依赖 ConfigurationManager）；初始状态目录来自当前捕获。
-            SettingsWindow = new FallbackSettingsWindow(_uiModel, this, RefreshStateCatalog(), chineseUi);
+            // 5. 安全更新器：只检查/下载到 staging，不热替换已加载 DLL。
+            var updateDir = Path.Combine(BepInEx.Paths.ConfigPath, "HealthAutoArrange", "updates");
+            _updater = new SafeUpdater(
+                this,
+                Logger,
+                Info.Metadata.Version.ToString(),
+                () => _officialManifestUrl?.Value,
+                () => _mirrorManifestUrl?.Value,
+                () => _allowUpdateMirror != null && _allowUpdateMirror.Value,
+                updateDir);
 
-            // 6. Harmony 补丁：目标缺失时降级，不抛异常
+            // 6. F8 设置窗口使用独立编辑副本，未保存修改不会污染宿主的已应用模型。
+            SettingsWindow = new FallbackSettingsWindow(_uiModel.Clone(), this, RefreshStateCatalog(), chineseUi);
+            if (_autoCheckUpdates != null && _autoCheckUpdates.Value) StartCoroutine(_updater.AutoCheckAfterDelay(10f));
+
+            // 7. Harmony 补丁：目标缺失时降级，不抛异常
             _harmony = new Harmony("com.healthautoarrange.plugin");
             try
             {
@@ -256,34 +286,49 @@ namespace HealthAutoArrange.Plugin
         // ---- IFallbackSettingsActions ----
 
         /// <summary>
-        /// Save：Normalize → 写临时文件后替换 rules 文件 → 应用模型。
-        /// 写文件失败仍应用内存模型；所有异常记录，不影响游戏。
+        /// Save：Normalize → 原子写 rules 文件 → 应用模型。磁盘失败时可继续应用到本次会话，
+        /// 但通过 SettingsSaveResult 明确告诉 UI 不要清除“未保存”状态。
         /// </summary>
-        public void Save(UiConfigModel model)
+        public SettingsSaveResult SaveWithResult(UiConfigModel model)
         {
+            if (model == null) return new SettingsSaveResult(false, false, "Model is null.");
             try
             {
                 model.Normalize();
-                var persisted = true;
+
+                // Apply first. Never persist a rules file that the current runtime rejected:
+                // doing so can make the next launch fail with settings the user never actually saw working.
+                if (!ApplyModel(model))
+                {
+                    const string applyDetail = "Runtime rejected the edited settings; the rules file was left unchanged.";
+                    Logger.LogWarning("HealthAutoArrange: " + applyDetail);
+                    return new SettingsSaveResult(false, false, applyDetail);
+                }
+
+                _uiModel = model.Clone();
                 try
                 {
                     RulesFileStore.Write(_rulesPath, model);
+                    Logger.LogInfo("Settings saved and applied.");
+                    return new SettingsSaveResult(true, true, string.Empty);
                 }
                 catch (Exception ex)
                 {
-                    persisted = false;
                     Logger.LogWarning($"Failed to write rules file: {ex.Message}");
+                    Logger.LogInfo("Settings applied in memory, but the rules file was not saved.");
+                    return new SettingsSaveResult(true, false, ex.Message);
                 }
-                ApplyModel(model);
-                _uiModel = model;
-                Logger.LogInfo(persisted
-                    ? "Settings saved and applied."
-                    : "Settings applied in memory, but the rules file was not saved.");
             }
             catch (Exception ex)
             {
                 Logger.LogWarning($"HealthAutoArrange: Save failed: {ex.Message}");
+                return new SettingsSaveResult(false, false, ex.Message);
             }
+        }
+
+        public void Save(UiConfigModel model)
+        {
+            SaveWithResult(model);
         }
 
         /// <summary>
@@ -299,10 +344,14 @@ namespace HealthAutoArrange.Plugin
                     Logger.LogWarning("Rules file not found; reload aborted.");
                     return null;
                 }
-                ApplyModel(model);
-                _uiModel = model;
+                if (!ApplyModel(model))
+                {
+                    Logger.LogWarning("Rules file was read but could not be applied; reload aborted.");
+                    return null;
+                }
+                _uiModel = model.Clone();
                 Logger.LogInfo("Settings reloaded from rules file.");
-                return model;
+                return model.Clone();
             }
             catch (Exception ex)
             {
@@ -362,6 +411,54 @@ namespace HealthAutoArrange.Plugin
         public void Close()
         {
             // 无副作用。
+        }
+
+        // ---- IFallbackSettingsUpdateActions ----
+
+        public UpdateUiSnapshot GetUpdateStatus()
+        {
+            return _updater?.Snapshot ?? new UpdateUiSnapshot(
+                UpdateUiState.Idle, Info?.Metadata?.Version?.ToString() ?? "1.1.6", string.Empty, string.Empty, string.Empty);
+        }
+
+        public void CheckForUpdates()
+        {
+            try { _updater?.CheckNow(); }
+            catch (Exception ex) { Logger.LogWarning($"HealthAutoArrange updater check start failed: {ex.Message}"); }
+        }
+
+        public void DownloadUpdate()
+        {
+            try { _updater?.DownloadAvailable(); }
+            catch (Exception ex) { Logger.LogWarning($"HealthAutoArrange updater download start failed: {ex.Message}"); }
+        }
+
+        public void OpenUpdatePage()
+        {
+            try { _updater?.OpenReleasePage(); }
+            catch (Exception ex) { Logger.LogWarning($"HealthAutoArrange updater release page failed: {ex.Message}"); }
+        }
+
+        public bool AutoCheckUpdates
+        {
+            get => _autoCheckUpdates != null && _autoCheckUpdates.Value;
+            set
+            {
+                if (_autoCheckUpdates == null || _autoCheckUpdates.Value == value) return;
+                _autoCheckUpdates.Value = value;
+                try { Config.Save(); } catch (Exception ex) { Logger.LogWarning($"Could not persist updater AutoCheck: {ex.Message}"); }
+            }
+        }
+
+        public bool AllowUpdateMirror
+        {
+            get => _allowUpdateMirror != null && _allowUpdateMirror.Value;
+            set
+            {
+                if (_allowUpdateMirror == null || _allowUpdateMirror.Value == value) return;
+                _allowUpdateMirror.Value = value;
+                try { Config.Save(); } catch (Exception ex) { Logger.LogWarning($"Could not persist updater AllowMirror: {ex.Message}"); }
+            }
         }
 
         // ---- IFallbackSettingsStateActions / IFallbackSettingsPreviewActions ----
@@ -510,16 +607,20 @@ namespace HealthAutoArrange.Plugin
         /// model.Enabled 只控制状态图标排序；提醒规则按各自 Enabled 独立运行。
         /// 保持当前 manager、观察快照与捕获注册表。
         /// </summary>
-        private void ApplyModel(UiConfigModel model)
+        private bool ApplyModel(UiConfigModel model)
         {
             try
             {
+                if (model == null) return false;
                 var config = model.ToConfig();
-                Adapter?.Reconfigure(config, model.Enabled);
+                if (Adapter == null) return false;
+                Adapter.Reconfigure(config, model.Enabled);
+                return true;
             }
             catch (Exception ex)
             {
                 Logger.LogWarning($"HealthAutoArrange: ApplyModel failed: {ex.Message}");
+                return false;
             }
         }
 
@@ -576,6 +677,7 @@ namespace HealthAutoArrange.Plugin
                 _overlay = null;
                 _presentation = null;
                 _harmony = null;
+                _updater = null;
             }
         }
     }

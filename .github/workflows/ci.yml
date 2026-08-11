@@ -19,6 +19,9 @@ jobs:
       - name: Static smoke
         run: python3 tools/static_smoke.py
 
+      - name: Validate updater trust key
+        run: python3 tools/update_key_check.py
+
       - name: Restore
         run: dotnet restore HealthAutoArrange.Tests/HealthAutoArrange.Tests.csproj
 

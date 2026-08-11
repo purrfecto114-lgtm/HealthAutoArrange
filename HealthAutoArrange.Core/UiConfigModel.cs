@@ -44,6 +44,40 @@ namespace HealthAutoArrange.Core
             return model;
         }
 
+        /// <summary>Create an independent editable copy for UI staging/rollback.</summary>
+        public UiConfigModel Clone()
+        {
+            var copy = new UiConfigModel
+            {
+                Enabled = Enabled,
+                GroupOrder = new List<string>(GroupOrder ?? new List<string>()),
+                UnknownStatePolicy = UnknownStatePolicy
+            };
+            foreach (var group in Groups)
+            {
+                if (group != null) copy.Groups.Add(new UiGroupModel(group.Name, group.StatesText));
+            }
+            foreach (var rule in Reminders)
+            {
+                if (rule == null) continue;
+                var cloned = new UiReminderModel(rule.Name, rule.Enabled, rule.Mode, rule.RepeatMode, rule.PeriodSeconds, rule.SendsPerPeriod)
+                {
+                    Template = rule.Template,
+                    PresetKind = rule.PresetKind,
+                    Opacity = rule.Opacity,
+                    DurationSeconds = rule.DurationSeconds,
+                    Placement = rule.Placement == null ? null : new ReminderPlacement(
+                        rule.Placement.Preset,
+                        rule.Placement.NormalizedX,
+                        rule.Placement.NormalizedY,
+                        rule.Placement.PixelOffsetX,
+                        rule.Placement.PixelOffsetY)
+                };
+                copy.Reminders.Add(cloned);
+            }
+            return copy;
+        }
+
         public ArrangeConfig ToConfig()
         {
             Normalize();
