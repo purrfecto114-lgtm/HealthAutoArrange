@@ -37,15 +37,12 @@ namespace HealthAutoArrange.Plugin
         SettingsSaveResult SaveWithResult(UiConfigModel model);
     }
 
-    /// <summary>Optional safe update controls. Downloads are staged only; never hot-installed.</summary>
+    /// <summary>Optional launch-only GitHub update status.</summary>
     public interface IFallbackSettingsUpdateActions
     {
         UpdateUiSnapshot GetUpdateStatus();
-        void CheckForUpdates();
-        void DownloadUpdate();
         void OpenUpdatePage();
         bool AutoCheckUpdates { get; set; }
-        bool AllowUpdateMirror { get; set; }
     }
 
     /// <summary>可选的状态目录刷新能力，不破坏既有宿主回调接口。</summary>
@@ -415,33 +412,17 @@ namespace HealthAutoArrange.Plugin
             DrawSectionHeader(_text.Updates, _text.UpdateSecurityHelp);
             var autoCheck = GUILayout.Toggle(updateActions.AutoCheckUpdates, _text.AutoCheckUpdates, GUILayout.Height(24f));
             if (autoCheck != updateActions.AutoCheckUpdates) updateActions.AutoCheckUpdates = autoCheck;
-            var allowMirror = GUILayout.Toggle(updateActions.AllowUpdateMirror, _text.AllowUpdateMirror, GUILayout.Height(24f));
-            if (allowMirror != updateActions.AllowUpdateMirror) updateActions.AllowUpdateMirror = allowMirror;
 
             var snapshot = updateActions.GetUpdateStatus();
             GUILayout.Label(_text.CurrentVersion + ": " + snapshot.CurrentVersion);
             if (!string.IsNullOrWhiteSpace(snapshot.LatestVersion))
                 GUILayout.Label(_text.LatestVersion + ": " + snapshot.LatestVersion);
             GUILayout.Label(_text.UpdateState(snapshot.State));
-            if (snapshot.State == UpdateUiState.Downloading)
-                GUILayout.Label(_text.DownloadProgress + ": " + Mathf.RoundToInt(snapshot.Progress01 * 100f) + "%");
             if (!string.IsNullOrWhiteSpace(snapshot.Detail))
             {
                 var detailStyle = new GUIStyle(GUI.skin.label) { wordWrap = true };
                 GUILayout.Label(snapshot.Detail, detailStyle, GUILayout.ExpandWidth(true));
             }
-            if (!string.IsNullOrWhiteSpace(snapshot.DownloadedPath))
-            {
-                GUILayout.Label(_text.UpdateDownloadedPath);
-                GUILayout.TextField(snapshot.DownloadedPath, GUILayout.ExpandWidth(true));
-            }
-
-            GUILayout.BeginHorizontal();
-            GUI.enabled = snapshot.CanCheck;
-            if (GUILayout.Button(_text.CheckUpdates, GUILayout.Height(30f))) updateActions.CheckForUpdates();
-            GUI.enabled = snapshot.CanDownload;
-            if (GUILayout.Button(_text.DownloadVerifiedUpdate, GUILayout.Height(30f))) updateActions.DownloadUpdate();
-            GUILayout.EndHorizontal();
             GUI.enabled = snapshot.HasUpdate;
             if (GUILayout.Button(_text.ReleaseNotes, GUILayout.Height(30f), GUILayout.ExpandWidth(true))) updateActions.OpenUpdatePage();
             GUI.enabled = true;

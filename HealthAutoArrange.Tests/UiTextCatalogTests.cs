@@ -54,10 +54,14 @@ namespace HealthAutoArrange.Tests
         {
             var zh = UiTextCatalog.ForLanguage(true);
             var en = UiTextCatalog.ForLanguage(false);
-            Assert.Contains("1.1.7", zh.UpdateBadge("1.1.7"));
-            Assert.Contains("1.1.7", en.UpdateBadge("1.1.7"));
-            Assert.Contains("RSA", zh.UpdateSecurityHelp);
-            Assert.Contains("SHA-256", en.UpdateSecurityHelp);
+            Assert.Contains("1.1.8", zh.UpdateBadge("1.1.8"));
+            Assert.Contains("1.1.8", en.UpdateBadge("1.1.8"));
+            // v1.1.8+ removed RSA signing; the help text now describes the simplified
+            // HTTPS + GitHub-host-whitelist model rather than mentioning RSA.
+            Assert.Contains("GitHub", zh.UpdateSecurityHelp);
+            Assert.Contains("GitHub", en.UpdateSecurityHelp);
+            Assert.DoesNotContain("RSA", zh.UpdateSecurityHelp);
+            Assert.DoesNotContain("RSA", en.UpdateSecurityHelp);
             Assert.Contains("不会", zh.UpdateInstallNote);
         }
     }

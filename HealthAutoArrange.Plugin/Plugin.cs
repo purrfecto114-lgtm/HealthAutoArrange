@@ -19,7 +19,7 @@ namespace HealthAutoArrange.Plugin
     /// 单个可选补丁目标缺失时降级并记录；运行期可捕获的托管异常尽量隔离。
     /// 不宣称能够吞掉 Unity 原生层故障，也不把 ABI/依赖不匹配伪装成“安全可继续”。
     /// </summary>
-    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.1.6")]
+    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.1.8")]
     public class Plugin : BaseUnityPlugin,
         IFallbackSettingsActions,
         IFallbackSettingsStateActions,
@@ -46,10 +46,10 @@ namespace HealthAutoArrange.Plugin
         private ConfigEntry<KeyCode> _debugDumpKey;
         private ConfigEntry<string> _uiLanguage;
         private ConfigEntry<bool> _autoCheckUpdates;
-        private ConfigEntry<bool> _allowUpdateMirror;
+        private ConfigEntry<float> _updateCheckDelaySeconds;
         private ConfigEntry<string> _officialManifestUrl;
-        private ConfigEntry<string> _mirrorManifestUrl;
         private SafeUpdater _updater;
+        private string _pendingUpdateVersion;
 
         private void Awake()
         {
@@ -92,15 +92,12 @@ namespace HealthAutoArrange.Plugin
             _uiLanguage = Config.Bind("UI", "Language", "Auto",
                 "Settings GUI language: Auto, Chinese, or English. The in-game button writes Chinese/English here.");
             _autoCheckUpdates = Config.Bind("Updates", "AutoCheck", true,
-                "Check for a signed stable update shortly after startup. This never installs or replaces DLLs automatically.");
-            _allowUpdateMirror = Config.Bind("Updates", "AllowMirror", true,
-                "Allow the signed CDN manifest/package mirror as a fallback when the official GitHub route is unavailable.");
+                "Check GitHub once shortly after each game launch and show a notification when an update is available.");
+            _updateCheckDelaySeconds = Config.Bind("Updates", "CheckDelaySeconds", 10f,
+                "Seconds to wait after game launch before the one-time GitHub update notification check.");
             _officialManifestUrl = Config.Bind("Updates", "OfficialManifestUrl",
                 "https://raw.githubusercontent.com/purrfecto114-lgtm/HealthAutoArrange/update-dist/latest.txt",
-                "Official signed update manifest. HTTPS only.");
-            _mirrorManifestUrl = Config.Bind("Updates", "MirrorManifestUrl",
-                "https://cdn.jsdelivr.net/gh/purrfecto114-lgtm/HealthAutoArrange@update-dist/latest.txt",
-                "Optional signed mirror manifest. The mirror is never trusted without RSA signature verification.");
+                "GitHub-hosted update manifest. GitHub HTTPS URLs only (github.com or raw.githubusercontent.com).");
             var chineseUi = ResolveChineseUiLanguage();
 
             // 2. 读取 BepInEx 配置（默认模板 + 兼容解析）
@@ -128,20 +125,16 @@ namespace HealthAutoArrange.Plugin
             _uiModel = LoadRulesModel(parseResult.Config);
             ApplyModel(_uiModel);
 
-            // 5. 安全更新器：只检查/下载到 staging，不热替换已加载 DLL。
-            var updateDir = Path.Combine(BepInEx.Paths.ConfigPath, "HealthAutoArrange", "updates");
+            // 5. 启动更新检查：仅从 GitHub 读取签名清单并提醒，不下载或安装文件。
             _updater = new SafeUpdater(
-                this,
                 Logger,
                 Info.Metadata.Version.ToString(),
                 () => _officialManifestUrl?.Value,
-                () => _mirrorManifestUrl?.Value,
-                () => _allowUpdateMirror != null && _allowUpdateMirror.Value,
-                updateDir);
+                ShowUpdateAvailableFeedback);
 
             // 6. F8 设置窗口使用独立编辑副本，未保存修改不会污染宿主的已应用模型。
             SettingsWindow = new FallbackSettingsWindow(_uiModel.Clone(), this, RefreshStateCatalog(), chineseUi);
-            if (_autoCheckUpdates != null && _autoCheckUpdates.Value) StartCoroutine(_updater.AutoCheckAfterDelay(10f));
+            if (_autoCheckUpdates != null && _autoCheckUpdates.Value) StartCoroutine(_updater.AutoCheckAfterDelay(Mathf.Max(0f, _updateCheckDelaySeconds?.Value ?? 10f)));
 
             // 7. Harmony 补丁：目标缺失时降级，不抛异常
             _harmony = new Harmony("com.healthautoarrange.plugin");
@@ -228,6 +221,7 @@ namespace HealthAutoArrange.Plugin
             try
             {
                 Adapter?.Update();
+                TryShowPendingUpdateFeedback();
                 if (_settingsKey != null && Input.GetKeyDown(_settingsKey.Value))
                 {
                     ToggleSettingsWindow();
@@ -418,19 +412,7 @@ namespace HealthAutoArrange.Plugin
         public UpdateUiSnapshot GetUpdateStatus()
         {
             return _updater?.Snapshot ?? new UpdateUiSnapshot(
-                UpdateUiState.Idle, Info?.Metadata?.Version?.ToString() ?? "1.1.6", string.Empty, string.Empty, string.Empty);
-        }
-
-        public void CheckForUpdates()
-        {
-            try { _updater?.CheckNow(); }
-            catch (Exception ex) { Logger.LogWarning($"HealthAutoArrange updater check start failed: {ex.Message}"); }
-        }
-
-        public void DownloadUpdate()
-        {
-            try { _updater?.DownloadAvailable(); }
-            catch (Exception ex) { Logger.LogWarning($"HealthAutoArrange updater download start failed: {ex.Message}"); }
+                UpdateUiState.Idle, Info?.Metadata?.Version?.ToString() ?? "1.1.8", string.Empty, string.Empty, string.Empty);
         }
 
         public void OpenUpdatePage()
@@ -450,15 +432,27 @@ namespace HealthAutoArrange.Plugin
             }
         }
 
-        public bool AllowUpdateMirror
+        private void ShowUpdateAvailableFeedback(string version)
         {
-            get => _allowUpdateMirror != null && _allowUpdateMirror.Value;
-            set
+            try
             {
-                if (_allowUpdateMirror == null || _allowUpdateMirror.Value == value) return;
-                _allowUpdateMirror.Value = value;
-                try { Config.Save(); } catch (Exception ex) { Logger.LogWarning($"Could not persist updater AllowMirror: {ex.Message}"); }
+                var text = (_overlay != null ? _overlay.Text.UpdateAvailableReminder(version) : "HealthAutoArrange update " + version + " is available on GitHub (F8 for details).");
+                Logger.LogInfo(text);
+                _pendingUpdateVersion = version;
+                TryShowPendingUpdateFeedback();
             }
+            catch (Exception ex) { Logger.LogWarning($"HealthAutoArrange update reminder failed: {ex.Message}"); }
+        }
+
+        private void TryShowPendingUpdateFeedback()
+        {
+            if (string.IsNullOrEmpty(_pendingUpdateVersion)) return;
+            var camera = PlayerCamera.main;
+            if (camera == null) return;
+            var text = _overlay != null ? _overlay.Text.UpdateAvailableReminder(_pendingUpdateVersion)
+                : "HealthAutoArrange update " + _pendingUpdateVersion + " is available on GitHub (F8 for details).";
+            camera.DoAlert(text, false);
+            _pendingUpdateVersion = null;
         }
 
         // ---- IFallbackSettingsStateActions / IFallbackSettingsPreviewActions ----

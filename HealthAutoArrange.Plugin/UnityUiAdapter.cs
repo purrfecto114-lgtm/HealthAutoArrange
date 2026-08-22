@@ -181,11 +181,17 @@ namespace HealthAutoArrange.Plugin
             // 只有实际 UI 重排受主开关控制。
             if (_runtime.Enabled) _lastSignature = string.Empty;
 
-            // 不在 MoodleManager.UpdateMoodles/AddAllMoodles 的 Harmony postfix 调用栈内
-            // 扫描或修改 Transform 层级。Unity 的 Destroy 在当前 Update 循环结束后才真正
-            // 销毁对象；严格跨 frame 可避免读到待销毁旧节点，也切断 SetSiblingIndex 引起的
-            // Transform 子级变化回调与 Moodle 刷新之间的同步递归链。
-            ScheduleAfterCurrentFrame();
+            // 同帧执行扫描/排序：postfix 仍在游戏刷新方法栈内，渲染发生在帧末，
+            // 此时 SetSiblingIndex 在本帧渲染时生效，避免新图标先以默认顺序显示一帧
+            // （v1.1.5 v2 引入的跨帧排序是 1.1.4 不存在的回归 —— 状态栏会闪烁，交替
+            // 显示排列前/排列后顺序）。失败路径（manager 为空 / 扫描异常 / 层级不稳定）
+            // 由 ProcessRefresh 内部不再重试 + 下一次游戏刷新触发兜底；ApplySiblingOrder
+            // 检测到 topology drift 时仍会主动 ScheduleAfterCurrentFrame（保留 v2 的
+            // nested-refresh / sibling 拓扑保护，仅恢复主路径的同帧语义）。
+            if (_scheduler.TryRunNow() == SortDispatchDecision.RunNow)
+            {
+                ProcessRefresh();
+            }
         }
 
         /// <summary>

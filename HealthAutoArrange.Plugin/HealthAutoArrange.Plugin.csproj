@@ -10,7 +10,21 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <!--
+      GameDir resolution order:
+      1. Explicitly passed -p:GameDir=...
+      2. HEALTHAUTOARRANGE_GAME_DIR environment variable
+      3. HealthAutoArrange.Local.props (gitignored, user-specific)
+      4. Fallback: committed build references under ../refs/ (stubs + BepInEx + Unity NuGet modules)
+
+      Option 4 makes the project build out-of-the-box without any secret or external
+      dependency. The committed refs are compile-time-only stubs and open-source
+      reference assemblies (see refs/README.md for licensing). At runtime, BepInEx
+      loads the game's real assemblies and the mod's references resolve to real types.
+      For full ABI verification, set GameDir to the real game installation directory.
+    -->
     <GameDir Condition="'$(GameDir)'=='' and '$(HEALTHAUTOARRANGE_GAME_DIR)'!=''">$(HEALTHAUTOARRANGE_GAME_DIR)</GameDir>
+    <GameDir Condition="'$(GameDir)'==''">$(MSBuildThisFileDirectory)..\refs</GameDir>
     <BepInExCoreDir>$(GameDir)\BepInEx\core</BepInExCoreDir>
     <GameManagedDir>$(GameDir)\CasualtiesUnknown_Data\Managed</GameManagedDir>
   </PropertyGroup>

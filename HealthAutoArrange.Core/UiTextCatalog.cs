@@ -84,19 +84,15 @@ namespace HealthAutoArrange.Core
         public string UnsavedClosePrompt => _chinese ? "还有未保存修改。关闭前要保存，还是丢弃并恢复磁盘配置？" : "You have unsaved changes. Save before closing, or discard them and restore the on-disk settings?";
         public string UnsavedReloadPrompt => _chinese ? "重载会丢弃当前未保存修改。继续吗？" : "Reloading will discard current unsaved changes. Continue?";
         public string Updates => _chinese ? "版本与更新" : "Version & updates";
-        public string AutoCheckUpdates => _chinese ? "启动后自动检查更新（只检查，不自动安装）" : "Check for updates after startup (check only; never auto-install)";
-        public string AllowUpdateMirror => _chinese ? "允许 CDN 镜像回退（国内网络可尝试）" : "Allow CDN mirror fallback (useful on restricted routes)";
+        public string AutoCheckUpdates => _chinese ? "每次启动游戏时从 GitHub 检查一次并提醒" : "Check GitHub once per game launch and notify";
         public string CurrentVersion => _chinese ? "当前版本" : "Current version";
         public string LatestVersion => _chinese ? "最新版本" : "Latest version";
-        public string CheckUpdates => _chinese ? "检查更新" : "Check now";
-        public string DownloadVerifiedUpdate => _chinese ? "下载并校验" : "Download & verify";
         public string ReleaseNotes => _chinese ? "版本说明" : "Release notes";
         public string UpdateBadge(string version) => _chinese ? "可更新 " + version : "Update " + version;
-        public string DownloadProgress => _chinese ? "下载进度" : "Download progress";
-        public string UpdateDownloadedPath => _chinese ? "已校验更新包位置：" : "Verified update package:";
+        public string UpdateAvailableReminder(string version) => _chinese ? "HealthAutoArrange 有新版本 " + version + "，按 F8 查看。" : "HealthAutoArrange " + version + " is available on GitHub (F8 for details).";
         public string UpdaterUnavailable => _chinese ? "当前运行环境未启用更新器。" : "Updater is not available in this runtime.";
-        public string UpdateInstallNote => _chinese ? "安全策略：更新器不会在游戏运行时替换 DLL。下载完成并通过签名/哈希校验后，请退出游戏再手动替换。" : "Safety policy: the updater never replaces loaded DLLs. After the package is downloaded and signature/hash verified, exit the game before replacing files manually.";
-        public string UpdateSecurityHelp => _chinese ? "同时尝试官方源与可选 CDN 镜像；镜像本身不被视为可信。清单必须通过内置 RSA 公钥验证，下载包还必须匹配清单中的 SHA-256 和大小。不会执行下载内容，也不会热替换 DLL。" : "Checks the official source and optional CDN mirror. The mirror itself is not trusted: the manifest must verify against the pinned RSA public key, and the package must match the signed SHA-256 and size. Downloaded content is never executed and loaded DLLs are never hot-replaced.";
+        public string UpdateInstallNote => _chinese ? "这里只提醒，不会下载或安装。请打开 GitHub 版本页面，退出游戏后手动更新 DLL。" : "Notification only: nothing is downloaded or installed. Open the GitHub release page and update the DLLs after exiting the game.";
+        public string UpdateSecurityHelp => _chinese ? "每次启动游戏只检查一次 GitHub 托管的清单；只接受 GitHub HTTPS 链接，不会下载、暂存或替换任何 DLL。请打开 GitHub Release 页面后退出游戏手动更新。" : "Checks the GitHub-hosted manifest once per game launch and only accepts GitHub HTTPS URLs. It never downloads, stages, or replaces DLLs. Open the GitHub release page and update manually after exiting the game.";
 
         public string EnabledHelp => _chinese
             ? "只控制游戏已创建 Moodle 图标的排序；不会改变伤病判定、严重度、脑芯片可见性或主/侧状态栏规则。状态提醒有各自的开关，关闭排序不会静默关闭提醒。"
@@ -137,9 +133,7 @@ namespace HealthAutoArrange.Core
                 case UpdateUiState.Checking: return _chinese ? "状态：正在检查…" : "Status: checking…";
                 case UpdateUiState.UpToDate: return _chinese ? "状态：已是最新版本" : "Status: up to date";
                 case UpdateUiState.Available: return _chinese ? "状态：发现可用更新" : "Status: update available";
-                case UpdateUiState.Downloading: return _chinese ? "状态：正在下载并校验…" : "Status: downloading and verifying…";
-                case UpdateUiState.Downloaded: return _chinese ? "状态：更新包已下载并校验" : "Status: verified package downloaded";
-                case UpdateUiState.Failed: return _chinese ? "状态：更新检查/下载失败" : "Status: update check/download failed";
+                case UpdateUiState.Failed: return _chinese ? "状态：启动更新检查失败" : "Status: launch update check failed";
                 default: return _chinese ? "状态：尚未检查" : "Status: not checked yet";
             }
         }
