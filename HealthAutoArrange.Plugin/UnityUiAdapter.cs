@@ -38,6 +38,9 @@ namespace HealthAutoArrange.Plugin
         private readonly HashSet<string> _lastPresentStates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private List<MoodleVisual> _lastVisualSnapshot = new List<MoodleVisual>();
         private bool _hasPresentSnapshot;
+        private bool _processingRefresh;  // Reentrancy guard: prevents StackOverflow when
+                                          // SetSiblingIndex triggers OnTransformChildrenChanged
+                                          // → game Moodle refresh → OnMoodlesUpdated → ProcessRefresh
         private float _nextReminderTickRealtime;
         private int _captureFloorSequence;
         private readonly Dictionary<int, int> _captureBoundaryByManager = new Dictionary<int, int>();
@@ -149,6 +152,17 @@ namespace HealthAutoArrange.Plugin
         {
             if (manager == null) return;
 
+            // Reentrancy guard: if ProcessRefresh (called below via TryRunNow) synchronously
+            // triggers SetSiblingIndex → OnTransformChildrenChanged → game Moodle refresh →
+            // OnMoodlesUpdated again, the recursive call must not re-enter the sort path.
+            // The inner call still updates the capture boundary (metadata only) but skips
+            // the same-frame sort, breaking the recursion chain.
+            if (_processingRefresh)
+            {
+                UpdateCaptureBoundary(manager);
+                return;
+            }
+
             // Manager normally is singular. Clear per-manager sequence boundaries when the actual
             // object changes so a recycled Unity instance ID can never inherit a stale capture
             // floor from a previously destroyed manager. Capture resolution itself remains scoped
@@ -160,32 +174,23 @@ namespace HealthAutoArrange.Plugin
             }
             _manager = manager;
 
-            // AddMoodle calls for this refresh have already happened before this postfix. Move the
-            // metadata window forward without clearing the registry in a prefix. Other mods may
-            // patch the same refresh/add paths, so a competing prefix clear would be Harmony-order
-            // sensitive and could erase captures produced earlier in the same refresh.
-            var managerKey = manager.GetInstanceID();
-            if (!_captureBoundaryByManager.TryGetValue(managerKey, out _captureFloorSequence))
-                _captureFloorSequence = 0;
-            _captureBoundaryByManager[managerKey] = _captures.LatestSequence;
-            if (_captureBoundaryByManager.Count > 16)
-            {
-                // Managers are normally singular. If scenes/mods churn them, avoid an unbounded
-                // bookkeeping dictionary; stale keys are only a metadata optimization.
-                var keep = _captureBoundaryByManager[managerKey];
-                _captureBoundaryByManager.Clear();
-                _captureBoundaryByManager[managerKey] = keep;
-            }
+            UpdateCaptureBoundary(manager);
 
             // 刷新边界：即使关闭排序，也继续观察 Moodle 并驱动已启用的提醒；
             // 只有实际 UI 重排受主开关控制。
             if (_runtime.Enabled) _lastSignature = string.Empty;
 
-            // 不在 MoodleManager.UpdateMoodles/AddAllMoodles 的 Harmony postfix 调用栈内
-            // 扫描或修改 Transform 层级。Unity 的 Destroy 在当前 Update 循环结束后才真正
-            // 销毁对象；严格跨 frame 可避免读到待销毁旧节点，也切断 SetSiblingIndex 引起的
-            // Transform 子级变化回调与 Moodle 刷新之间的同步递归链。
-            ScheduleAfterCurrentFrame();
+            // 同帧执行扫描/排序：postfix 仍在游戏刷新方法栈内，渲染发生在帧末，
+            // 此时 SetSiblingIndex 在本帧渲染时生效，避免新图标先以默认顺序显示一帧
+            // （v1.1.5 v2 引入的跨帧排序是 1.1.4 不存在的回归 —— 状态栏会闪烁，交替
+            // 显示排列前/排列后顺序）。失败路径（manager 为空 / 扫描异常 / 层级不稳定）
+            // 由 ProcessRefresh 内部不再重试 + 下一次游戏刷新触发兜底；ApplySiblingOrder
+            // 检测到 topology drift 时仍会主动 ScheduleAfterCurrentFrame（保留 v2 的
+            // nested-refresh / sibling 拓扑保护，仅恢复主路径的同帧语义）。
+            if (_scheduler.TryRunNow() == SortDispatchDecision.RunNow)
+            {
+                ProcessRefresh();
+            }
         }
 
         /// <summary>
@@ -232,6 +237,27 @@ namespace HealthAutoArrange.Plugin
         /// 游戏刷新已由 scheduler 保证跨帧；扫描失败时放弃本轮并等待下一刷新边界。
         /// </summary>
         private void ProcessRefresh()
+        {
+            // Reentrancy guard: when OnMoodlesUpdated calls ProcessRefresh synchronously
+            // (same-frame sort), SetSiblingIndex inside ApplySort can synchronously trigger
+            // OnTransformChildrenChanged → game Moodle refresh → OnMoodlesUpdated → ProcessRefresh.
+            // Without this guard, the recursive call would re-enter ApplySort on a stale
+            // hierarchy and risk StackOverflow (which would crash the plugin and disable
+            // F8/F9 and all other functionality). The recursive call is dropped; the
+            // outer call completes its sort and the next game refresh will re-evaluate.
+            if (_processingRefresh) return;
+            _processingRefresh = true;
+            try
+            {
+                ProcessRefreshCore();
+            }
+            finally
+            {
+                _processingRefresh = false;
+            }
+        }
+
+        private void ProcessRefreshCore()
         {
             if (_manager == null)
             {
@@ -297,6 +323,25 @@ namespace HealthAutoArrange.Plugin
             _lastSignature = string.Empty;
             UpdatePresentSnapshot(new List<MoodleVisual>());
             _nextReminderTickRealtime = 0f;
+        }
+
+        /// <summary>
+        /// 更新 AddMoodle 捕获窗口的 per-manager sequence 边界。
+        /// 从 OnMoodlesUpdated 调用；也可从 reentrancy guard 的内层递归调用路径单独调用
+        /// 以确保捕获边界元数据始终推进，即使主路径跳过了同帧排序。
+        /// </summary>
+        private void UpdateCaptureBoundary(MoodleManager manager)
+        {
+            var managerKey = manager.GetInstanceID();
+            if (!_captureBoundaryByManager.TryGetValue(managerKey, out _captureFloorSequence))
+                _captureFloorSequence = 0;
+            _captureBoundaryByManager[managerKey] = _captures.LatestSequence;
+            if (_captureBoundaryByManager.Count > 16)
+            {
+                var keep = _captureBoundaryByManager[managerKey];
+                _captureBoundaryByManager.Clear();
+                _captureBoundaryByManager[managerKey] = keep;
+            }
         }
 
         /// <summary>

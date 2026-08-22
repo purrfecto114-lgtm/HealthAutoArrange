@@ -22,20 +22,32 @@ LogOutput.log
 *.zip
 *.nupkg
 
-# Secrets, keys and certificates
+# Secrets, keys and certificates (defensive patterns; no signing scheme currently in use)
 .env
 .env.*
 *.key
 *.pfx
-*.pem
 *.crt
 *.cer
+# Defensive PEM blocking — covers any future re-introduction of signing material.
+# v1.1.8+ removed RSA signing from the updater; there is no public PEM to commit.
+*.pem
 
-# Game assemblies (never committed)
+# Game assemblies (never committed to repo root or arbitrary dirs)
 Assembly-CSharp.dll
 UnityEngine*.dll
 BepInEx.dll
 0Harmony.dll
 
-# Local update signing material (never commit)
-*update-signing-private*.pem
+# Exception: committed build references under refs/ are safe (stubs + BepInEx + Unity NuGet)
+# See refs/README.md for licensing details
+!refs/
+!refs/**
+!refs/**/Assembly-CSharp.dll
+!refs/**/UnityEngine*.dll
+!refs/**/BepInEx.dll
+!refs/**/0Harmony.dll
+
+# Python bytecode cache
+__pycache__/
+*.pyc
