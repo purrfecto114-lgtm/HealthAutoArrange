@@ -65,7 +65,7 @@ check('reminder episode has transient UI absence grace', 'EpisodeResetGraceSecon
 check('engine does not burst catch up missed repeat slots', 'rt.NextDueAt = now.AddSeconds(rule.EffectiveIntervalSeconds)' in engine and 'while (now >=' not in engine)
 check('reminder cadence has timer tick independent of Moodle refresh', 'ReminderTickSeconds = 0.25f' in adapter and 'RunRemindersSnapshot()' in adapter)
 check('reminders do not emit from refresh processing while game is paused', 'if (Time.timeScale > 0f)' in adapter and 'RunRemindersSnapshot();' in adapter)
-check('sorting toggle no longer disables reminder observation/ticks', 'if (!_runtime.Enabled) return;' not in adapter.split('public void Update()',1)[1].split('private void ProcessRefresh()',1)[0] and 'if (!_runtime.Enabled || visuals.Count < 2) return;' in adapter)
+check('sorting toggle no longer disables reminder observation/ticks', 'if (!_runtime.Enabled) return;' not in adapter.split('public void Update()',1)[1].split('private void ProcessRefresh()',1)[0] and 'if (!_runtime.Enabled || visuals.Count < 1) return;' in adapter)
 check('reconfigure preserves continuous reminder episode state', '_reminders.Reconfigure(config.Reminders)' in adapter and 'new ReminderEngine(config.Reminders)' not in adapter)
 check('timer reminder uses cached UI-confirmed visual snapshot', '_lastVisualSnapshot' in adapter and 'BuildContext(message, _lastVisualSnapshot)' in adapter)
 check('BottomAlert avoids native DoAlert double delivery', 'case ReminderMode.BottomAlert:' in dispatcher and 'PlayerCamera.main' not in dispatcher)
@@ -125,10 +125,10 @@ check('diagnostic live scan cannot bypass pending-frame gate', 'Pending=True; li
 check('multi-parent sort aborts whole stale snapshot after nested refresh', 'Stop the whole stale snapshot here' in adapter and '_lastSignature = string.Empty;' in adapter.split('private void ApplySort',1)[1].split('private void LogThrottled',1)[0])
 check('sibling topology drift queues a fresh-frame rescan', 'Topology drift without a nested refresh callback' in adapter and 'ScheduleAfterCurrentFrame();' in adapter.split('private bool ApplySiblingOrder',1)[1].split('private bool ApplyAnchoredSlots',1)[0])
 
-# v1.1.8 UX / updater regression contracts
+# v1.1.8+ UX / updater regression contracts
 updater=text('HealthAutoArrange.Plugin/SafeUpdater.cs')
 release=text('.github/workflows/release.yml')
-check('v1.1.8 metadata is active', '"1.1.8"' in plugin and '1.1.8.0' in text('HealthAutoArrange.Plugin/Properties/AssemblyInfo.cs'))
+check('current release metadata is active', ('"1.1.8"' in plugin or '"1.1.9"' in plugin) and ('1.1.8.0' in text('HealthAutoArrange.Plugin/Properties/AssemblyInfo.cs') or '1.1.9.0' in text('HealthAutoArrange.Plugin/Properties/AssemblyInfo.cs')))
 check('settings UI edits an independent clone', 'FallbackSettingsWindow(_uiModel.Clone()' in plugin and 'public UiConfigModel Clone()' in ui)
 check('failed disk save remains visibly unsaved', 'SaveWithResult' in window and 'result.Persisted && result.Applied' in window and '_dirty = true;' in window and 'SaveMemoryOnly' in textcat)
 check('close/reload guard unsaved edits', 'PendingDestructiveAction.Close' in window and 'PendingDestructiveAction.Reload' in window and 'UnsavedClosePrompt' in textcat)

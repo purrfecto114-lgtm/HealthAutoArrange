@@ -288,7 +288,7 @@ namespace HealthAutoArrange.Plugin
             }
             _nextReminderTickRealtime = Time.realtimeSinceStartup + ReminderTickSeconds;
 
-            if (!_runtime.Enabled || visuals.Count < 2) return;
+            if (!_runtime.Enabled || visuals.Count < 1) return;
 
             try
             {

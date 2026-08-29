@@ -19,7 +19,7 @@ namespace HealthAutoArrange.Plugin
     /// 单个可选补丁目标缺失时降级并记录；运行期可捕获的托管异常尽量隔离。
     /// 不宣称能够吞掉 Unity 原生层故障，也不把 ABI/依赖不匹配伪装成“安全可继续”。
     /// </summary>
-    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.1.8")]
+    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.1.9")]
     public class Plugin : BaseUnityPlugin,
         IFallbackSettingsActions,
         IFallbackSettingsStateActions,
@@ -50,6 +50,8 @@ namespace HealthAutoArrange.Plugin
         private ConfigEntry<string> _officialManifestUrl;
         private SafeUpdater _updater;
         private string _pendingUpdateVersion;
+        private string _statusMessage = string.Empty;
+        private float _statusMessageUntil;
 
         private void Awake()
         {
@@ -214,18 +216,28 @@ namespace HealthAutoArrange.Plugin
         }
 
         /// <summary>
-        /// 每帧驱动重试中的刷新；F8 切换设置窗口；F9 触发诊断 dump。
+        /// 每帧：先处理热键（F8 设置、F9 诊断、Ctrl+R 立即重排、Ctrl+E 快速开关），
+        /// 再驱动 Adapter。把热键检查放在 Adapter.Update() 之前是为了即使 adapter 抛
+        /// 出未捕获异常时，F8/F9 仍然可用——这是历史上"GUI 失效"反馈的根因之一。
         /// </summary>
         private void Update()
         {
+            // Hotkey checks FIRST so input is never swallowed by adapter exceptions.
+            // Each block has its own try/catch so a failure in one path cannot disable the others.
             try
             {
-                Adapter?.Update();
-                TryShowPendingUpdateFeedback();
                 if (_settingsKey != null && Input.GetKeyDown(_settingsKey.Value))
                 {
                     ToggleSettingsWindow();
                 }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning($"HealthAutoArrange: settings key toggle error: {ex.Message}");
+            }
+
+            try
+            {
                 if (_debugDumpKey != null && Input.GetKeyDown(_debugDumpKey.Value))
                 {
                     Logger.LogInfo("F9 diagnostics requested.");
@@ -234,16 +246,79 @@ namespace HealthAutoArrange.Plugin
             }
             catch (Exception ex)
             {
+                Logger.LogWarning($"HealthAutoArrange: diagnostics key error: {ex.Message}");
+            }
+
+            // Ctrl+R: force-resort fallback. Useful when F8 GUI is broken or when user
+            // wants to verify the sort pipeline works without opening the settings window.
+            try
+            {
+                if (Input.GetKey(KeyCode.LeftControl) && Input.GetKeyDown(KeyCode.R))
+                {
+                    Logger.LogInfo("Ctrl+R force-resort requested.");
+                    ForceResort();
+                    _statusMessage = "HealthAutoArrange: force resort requested";
+                    _statusMessageUntil = Time.realtimeSinceStartup + 3f;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning($"HealthAutoArrange: force-resort hotkey error: {ex.Message}");
+            }
+
+            // Ctrl+E: quick enable/disable toggle. Lets users toggle the auto-arrange without
+            // opening the F8 window. The new state is applied immediately via ApplyModel.
+            try
+            {
+                if (Input.GetKey(KeyCode.LeftControl) && Input.GetKeyDown(KeyCode.E))
+                {
+                    if (_uiModel != null)
+                    {
+                        _uiModel.Enabled = !_uiModel.Enabled;
+                        ApplyModel(_uiModel);
+                        try { Config.Save(); } catch { /* ignore */ }
+                        Logger.LogInfo($"Ctrl+E toggled auto-arrange: Enabled={_uiModel.Enabled}");
+                        _statusMessage = "HealthAutoArrange: " + (_uiModel.Enabled ? "ENABLED" : "DISABLED");
+                        _statusMessageUntil = Time.realtimeSinceStartup + 3f;
+                        // Reflect the change into the F8 window's editable model too, so the
+                        // checkbox stays in sync when the user opens the window later.
+                        SettingsWindow?.SyncEnabledFromRuntime(_uiModel.Enabled);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning($"HealthAutoArrange: quick-toggle hotkey error: {ex.Message}");
+            }
+
+            try
+            {
+                Adapter?.Update();
+                TryShowPendingUpdateFeedback();
+            }
+            catch (Exception ex)
+            {
                 Logger.LogWarning($"HealthAutoArrange: Update error: {ex.Message}");
             }
         }
 
         /// <summary>
-        /// IMGUI 设置窗口绘制 + 透明提醒 overlay 绘制。
+        /// IMGUI 设置窗口绘制 + 透明提醒 overlay 绘制 + 状态徽标绘制。
         /// 两者分别捕获可恢复的托管异常；overlay 不依赖 F8 窗口是否打开。
+        /// 状态徽标独立于 F8 窗口，让用户随时确认插件已加载并查看当前 Enabled 状态。
         /// </summary>
         private void OnGUI()
         {
+            // Status badge is drawn first so it's always visible even if F8 window throws.
+            try
+            {
+                DrawStatusBadge();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning($"HealthAutoArrange: status badge GUI error: {ex.Message}");
+            }
+
             try
             {
                 SettingsWindow?.Draw();
@@ -260,6 +335,54 @@ namespace HealthAutoArrange.Plugin
             catch (Exception ex)
             {
                 Logger.LogWarning($"HealthAutoArrange: reminder overlay GUI error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 在屏幕左上角绘制一个小的状态徽标。当 F8 设置窗口打开时，徽标会移到右上角，
+        /// 避免与设置窗口的左上角内容冲突。徽标颜色和文字反映当前 Enabled 状态。
+        /// 这是"GUI 失效"反馈的兜底——即使 F8 窗口自身因任何原因无法打开，用户仍能
+        /// 通过徽标确认插件加载情况，并通过 Ctrl+E / Ctrl+R / F9 等热键操作。
+        /// </summary>
+        private void DrawStatusBadge()
+        {
+            if (_uiModel == null) return;
+            var previousColor = GUI.color;
+            var previousMatrix = GUI.matrix;
+            try
+            {
+                var enabled = _uiModel.Enabled;
+                var badgeText = "HAA: " + (enabled ? "ON" : "OFF")
+                    + (SettingsWindowOpen ? " (F8)" : string.Empty);
+                if (!string.IsNullOrEmpty(_statusMessage)
+                    && Time.realtimeSinceStartup < _statusMessageUntil)
+                {
+                    badgeText += "\n" + _statusMessage;
+                }
+                var content = new GUIContent(badgeText);
+                var style = new GUIStyle(GUI.skin.box)
+                {
+                    fontSize = 12,
+                    fontStyle = FontStyle.Bold,
+                    alignment = TextAnchor.MiddleCenter
+                };
+                style.normal.textColor = Color.white;
+                var size = style.CalcSize(content);
+                var padding = 6f;
+                var w = size.x + padding * 2f;
+                var h = size.y + padding * 2f;
+                // Move the badge to the top-right when F8 window is open, top-left otherwise.
+                var x = SettingsWindowOpen ? Screen.width - w - 8f : 8f;
+                var y = 8f;
+                GUI.color = new Color(0f, 0f, 0f, 0.55f);
+                GUI.Box(new Rect(x, y, w, h), GUIContent.none, style);
+                GUI.color = enabled ? new Color(0.55f, 1f, 0.55f, 1f) : new Color(1f, 0.55f, 0.55f, 1f);
+                GUI.Label(new Rect(x, y, w, h), badgeText, style);
+            }
+            finally
+            {
+                GUI.color = previousColor;
+                GUI.matrix = previousMatrix;
             }
         }
 
@@ -371,11 +494,37 @@ namespace HealthAutoArrange.Plugin
             try
             {
                 Adapter?.DumpDiagnostics();
+                DumpPatchDiagnostics();
                 ShowDiagnosticsFeedback();
             }
             catch (Exception ex)
             {
                 Logger.LogWarning($"HealthAutoArrange: Diagnostics failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 将各 Harmony 补丁的运行期触发情况写入日志。当用户反馈"功能失效"时，
+        /// 这一段可以让用户/作者快速判断到底是补丁没装上，还是装上了但没被调用，
+        /// 还是调用了但 Adapter 内部失败。三档区分能极大缩短问题定位时间。
+        /// </summary>
+        private void DumpPatchDiagnostics()
+        {
+            try
+            {
+                Logger.LogInfo("----- HealthAutoArrange patch diagnostics -----");
+                Logger.LogInfo($"  MoodleRefreshPostfix invoked: {GamePatches.MoodleRefreshPostfixInvoked} (count: {GamePatches.MoodleRefreshInvokeCount})");
+                Logger.LogInfo($"  AddMoodlePrefix      invoked: {GamePatches.AddMoodlePrefixInvoked} (count: {GamePatches.AddMoodleInvokeCount})");
+                Logger.LogInfo($"  IsPointerOverUIElementPostfix invoked: {GamePatches.PointerOverUiPostfixInvoked}");
+                Logger.LogInfo($"  Settings window open now: {SettingsWindowOpen}");
+                Logger.LogInfo($"  Auto-arrange Enabled: {(_uiModel?.Enabled ?? false)}");
+                Logger.LogInfo($"  Adapter alive: {(Adapter != null ? "yes" : "no")}");
+                Logger.LogInfo($"  Manager tracked: {(Adapter != null ? "yes" : "no")}");
+                Logger.LogInfo("----- end patch diagnostics -----");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning($"HealthAutoArrange: patch diagnostics dump failed: {ex.Message}");
             }
         }
 

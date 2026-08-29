@@ -142,6 +142,21 @@ namespace HealthAutoArrange.Plugin
         public bool IsOpen => _open;
         public UiConfigModel Model => _model;
 
+        /// <summary>
+        /// Sync the Enabled flag in the editable UI model from the runtime state.
+        /// Called when an external hotkey (Ctrl+E) toggles Enabled without going through
+        /// the F8 window. Keeps the F8 checkbox in sync the next time the window is opened.
+        /// </summary>
+        public void SyncEnabledFromRuntime(bool enabled)
+        {
+            try
+            {
+                if (_model != null) _model.Enabled = enabled;
+                // No _dirty change here: the runtime already applied the change.
+            }
+            catch { /* best-effort UI sync; ignore */ }
+        }
+
         public void Open()
         {
             _open = true;
@@ -241,8 +256,55 @@ namespace HealthAutoArrange.Plugin
             _scroll = GUILayout.BeginScrollView(_scroll, GUILayout.ExpandHeight(true));
 
             DrawSectionHeader(_text.Basic, _text.EnabledHelp);
-            var enabled = GUILayout.Toggle(_model.Enabled, _text.Enabled, GUILayout.Height(26f));
-            if (enabled != _model.Enabled) { _model.Enabled = enabled; _dirty = true; }
+            var prevEnabled = _model.Enabled;
+            var enabled = GUILayout.Toggle(prevEnabled, _text.Enabled, GUILayout.Height(26f));
+            if (enabled != prevEnabled)
+            {
+                _model.Enabled = enabled;
+                // Apply the master toggle immediately so the user sees the effect without
+                // having to click Save. This is the fix for "mod switch failure" feedback:
+                // users expected the toggle to disable sorting right away.
+                var persistence = _actions as IFallbackSettingsPersistenceActions;
+                if (persistence != null)
+                {
+                    try
+                    {
+                        var result = persistence.SaveWithResult(_model);
+                        if (result.Applied)
+                        {
+                            _selectionEditor = _model.CreateSelectionEditor();
+                            if (result.Persisted)
+                            {
+                                _dirty = false;
+                                _stateMessage = _text.SaveSucceeded;
+                                _pendingDestructiveAction = PendingDestructiveAction.None;
+                            }
+                            else
+                            {
+                                _dirty = true;
+                                _stateMessage = _text.SaveMemoryOnly;
+                            }
+                        }
+                        else
+                        {
+                            _dirty = true;
+                            _stateMessage = _text.SaveFailed
+                                + (string.IsNullOrWhiteSpace(result.Detail) ? string.Empty : " " + result.Detail);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _dirty = true;
+                        _stateMessage = _text.SaveFailed + ex.Message;
+                    }
+                }
+                else
+                {
+                    // No persistence callback; fall back to legacy Save() which still applies at runtime.
+                    try { _actions.Save(_model); _dirty = false; _stateMessage = _text.SaveSucceeded; }
+                    catch (Exception ex) { _dirty = true; _stateMessage = _text.SaveFailed + ex.Message; }
+                }
+            }
 
             DrawSectionHeader(_text.UnknownStatePolicy, _text.UnknownPolicyHelp);
             var policy = DrawPolicy(_model.UnknownStatePolicy, _text);

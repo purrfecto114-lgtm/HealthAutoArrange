@@ -14,6 +14,15 @@ namespace HealthAutoArrange.Plugin
     /// </summary>
     public static class GamePatches
     {
+        // Diagnostics flags: set when each patch is actually invoked at runtime.
+        // The F8 "Version & Updates" panel can read these to confirm the patches are
+        // not only applied (logged once in Plugin.InitializePlugin) but actually firing.
+        internal static bool PointerOverUiPostfixInvoked;
+        internal static bool MoodleRefreshPostfixInvoked;
+        internal static bool AddMoodlePrefixInvoked;
+        internal static long MoodleRefreshInvokeCount;
+        internal static long AddMoodleInvokeCount;
+
         /// <summary>
         /// UIUtil.IsPointerOverUIElement() 后置补丁：保留游戏和其他 Mod 的原始判断，
         /// 只在 F8 设置窗口打开时把最终结果提升为 true。
@@ -22,6 +31,7 @@ namespace HealthAutoArrange.Plugin
         /// </summary>
         public static void IsPointerOverUIElementPostfix(ref bool __result)
         {
+            PointerOverUiPostfixInvoked = true;
             if (Plugin.SettingsWindowOpen) __result = true;
         }
 
@@ -31,6 +41,8 @@ namespace HealthAutoArrange.Plugin
         /// </summary>
         public static void MoodleRefreshPostfix(MoodleManager __instance)
         {
+            MoodleRefreshPostfixInvoked = true;
+            MoodleRefreshInvokeCount++;
             try
             {
                 Plugin.Adapter?.OnMoodlesUpdated(__instance);
@@ -54,6 +66,8 @@ namespace HealthAutoArrange.Plugin
             bool __4,
             bool __5)
         {
+            AddMoodlePrefixInvoked = true;
+            AddMoodleInvokeCount++;
             try
             {
                 // Harmony supports __n positional argument injection. Using indexes here avoids
