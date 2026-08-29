@@ -19,7 +19,7 @@ namespace HealthAutoArrange.Plugin
     /// 单个可选补丁目标缺失时降级并记录；运行期可捕获的托管异常尽量隔离。
     /// 不宣称能够吞掉 Unity 原生层故障，也不把 ABI/依赖不匹配伪装成“安全可继续”。
     /// </summary>
-    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.1.9")]
+    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.2.1")]
     public class Plugin : BaseUnityPlugin,
         IFallbackSettingsActions,
         IFallbackSettingsStateActions,
@@ -163,7 +163,8 @@ namespace HealthAutoArrange.Plugin
                 Logger.LogWarning($"Failed to patch Moodle refresh boundary: {ex.Message}");
             }
 
-            // AddMoodle 前缀只捕获元数据；刷新边界上面只选择一个方法，避免重复触发。
+            // AddMoodle 前缀只捕获元数据；后缀（v1.2.0 新增）记录新创建 moodle 的
+            // instance id 到 fresh-set。刷新边界上面只选择一个方法，避免重复触发。
             try
             {
                 var addMoodle = AccessTools.Method(
@@ -178,8 +179,9 @@ namespace HealthAutoArrange.Plugin
                 {
                     _harmony.Patch(
                         addMoodle,
-                        prefix: new HarmonyMethod(typeof(GamePatches), nameof(GamePatches.AddMoodlePrefix)));
-                    Logger.LogInfo("Patched MoodleManager.AddMoodle capture.");
+                        prefix: new HarmonyMethod(typeof(GamePatches), nameof(GamePatches.AddMoodlePrefix)),
+                        postfix: new HarmonyMethod(typeof(GamePatches), nameof(GamePatches.AddMoodlePostfix)));
+                    Logger.LogInfo("Patched MoodleManager.AddMoodle capture (prefix) + fresh-set tracker (postfix, v1.2.0).");
                 }
             }
             catch (Exception ex)
@@ -515,6 +517,7 @@ namespace HealthAutoArrange.Plugin
                 Logger.LogInfo("----- HealthAutoArrange patch diagnostics -----");
                 Logger.LogInfo($"  MoodleRefreshPostfix invoked: {GamePatches.MoodleRefreshPostfixInvoked} (count: {GamePatches.MoodleRefreshInvokeCount})");
                 Logger.LogInfo($"  AddMoodlePrefix      invoked: {GamePatches.AddMoodlePrefixInvoked} (count: {GamePatches.AddMoodleInvokeCount})");
+                Logger.LogInfo($"  AddMoodlePostfix     invoked: {GamePatches.AddMoodlePostfixInvoked} (count: {GamePatches.AddMoodlePostfixInvokeCount})  [v1.2.0]");
                 Logger.LogInfo($"  IsPointerOverUIElementPostfix invoked: {GamePatches.PointerOverUiPostfixInvoked}");
                 Logger.LogInfo($"  Settings window open now: {SettingsWindowOpen}");
                 Logger.LogInfo($"  Auto-arrange Enabled: {(_uiModel?.Enabled ?? false)}");

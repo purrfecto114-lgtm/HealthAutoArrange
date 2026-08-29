@@ -48,6 +48,43 @@ namespace HealthAutoArrange.Plugin
         private const int MaxRememberedErrorMessages = 64;
         private readonly Dictionary<string, float> _lastErrorLogTime = new Dictionary<string, float>();
 
+        // --- v1.2.0 multi-pronged refresh strategy -----------------------------------
+        // Regression background: v1.1.3+ moved the sort into UpdateMoodles postfix (same-frame).
+        // Under Casualties Unknown Demo 7.0.1 the game calls MoodleManager.Update 
+        // every 0.5s; each call runs ClearMoodles (UnityEngine.Object.Destroy, deferred to end of
+        // frame) + AddAllMoodles (creates new GameObjects). If the postfix sort is skipped or
+        // operates on a half-destroyed hierarchy, the user sees the original game order
+        // "stick" after the first cycle.
+        //
+        // New approach (v1.2.0):
+        // 1. AddMoodle postfix: capture the just-created moodle's instance ID into a fresh set.
+        //    This gives the scanner a precise "alive set" so it can skip Destroy-pending nodes
+        //    even when Unity's fake-null check is ambiguous in the same frame.
+        // 2. Plugin.Update periodic re-sort: a safety-net timer that fires ~4 Hz independently of
+        //    the game's refresh cycle. If the UpdateMoodles postfix is dropped/skipped for any
+        //    reason, the periodic check still re-sorts. The periodic pass runs on a *different*
+        //    Unity frame than the game's ClearMoodles+AddAllMoodles, so Destroy has completed
+        //    and the scan sees only live moodles.
+        // 3. Scan filter: when the fresh set is populated (during an active refresh cycle),
+        //    only children whose GetInstanceID() is in the set are admitted. This eliminates
+        //    the "old + new moodles in the same scan" double-count bug.
+        // -----------------------------------------------------------------------------
+        private const float PeriodicResortIntervalSeconds = 0.25f;  // 4 Hz safety-net sort
+        private float _nextPeriodicResortRealtime;
+        private long _periodicResortCount;
+        private long _addMoodlePostfixCount;
+        // Per-manager "fresh instance id" set. Reset when the manager reference changes or
+        // when an UpdateMoodles cycle completes. Populated by AddMoodle postfix.
+        private readonly Dictionary<int, HashSet<int>> _freshInstanceIdsByManager = new Dictionary<int, HashSet<int>>();
+        private int _freshManagerKey;  // current manager's GetInstanceID(), 0 if none
+
+        // v1.2.1 diagnostics: how many times we fell back from SiblingOrder to
+        // AnchoredPosition because CanSafelyUseSiblingOrder failed (e.g., bonus
+        // moodle present, mixed main+side rows, or extra non-Moodle children).
+        // F9 dump prints this so users can confirm the fallback path is firing.
+        private long _siblingSortFallbackCount;
+        private long _anchoredSortWriteCount;
+
         public UnityUiAdapter(
             SortPlan plan,
             ReminderEngine reminders,
@@ -104,6 +141,9 @@ namespace HealthAutoArrange.Plugin
             _runtime.Enabled = enabled;
             _lastSignature = string.Empty;
             _nextReminderTickRealtime = 0f;
+            // v1.2.0: also clear the fresh-set so the next scan picks up the new plan
+            // against the live hierarchy without stale instance-id filters.
+            ClearFreshInstanceSet();
 
             // Keep the last confirmed presence snapshot and request a fresh scan. The master UI
             // toggle controls sorting only; reminder rules remain independent as stated in the GUI.
@@ -145,6 +185,72 @@ namespace HealthAutoArrange.Plugin
         }
 
         /// <summary>
+        /// v1.2.0: AddMoodle postfix callback. Records the just-created moodle's
+        /// Transform instance ID into a per-manager "fresh set". The next Scan
+        /// (invoked from OnMoodlesUpdated or the periodic safety-net timer) uses
+        /// this set to filter out Destroy-pending nodes left over by ClearMoodles.
+        /// </summary>
+        public void OnMoodleCreated(MoodleManager manager)
+        {
+            _addMoodlePostfixCount++;
+            try
+            {
+                if (manager == null) return;
+                Transform moodles;
+                try { moodles = manager.moodles; }
+                catch { return; }
+                if (moodles == null) return;
+
+                int key;
+                try { key = manager.GetInstanceID(); }
+                catch { return; }
+                if (key == 0) return;
+
+                // The just-created moodle is the last child of manager.moodles.
+                int lastIdx = moodles.childCount - 1;
+                if (lastIdx < 0) return;
+                var newChild = moodles.GetChild(lastIdx);
+                if (newChild == null) return;  // already destroyed by another Mod
+
+                int childId;
+                try { childId = newChild.GetInstanceID(); }
+                catch { return; }
+                if (childId == 0) return;
+
+                // v1.2.0: if the manager changed, start a new fresh set. This guards
+                // against stale instance IDs from a recycled manager.
+                if (_freshManagerKey != 0 && _freshManagerKey != key)
+                {
+                    _freshInstanceIdsByManager.Clear();
+                }
+                _freshManagerKey = key;
+
+                if (!_freshInstanceIdsByManager.TryGetValue(key, out var set) || set == null)
+                {
+                    set = new HashSet<int>();
+                    _freshInstanceIdsByManager[key] = set;
+                }
+                set.Add(childId);
+            }
+            catch (Exception ex)
+            {
+                LogThrottled($"OnMoodleCreated fresh-id capture failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// v1.2.0: drop the fresh-instance set. Called after ProcessRefresh in
+        /// OnMoodlesUpdated (the set has been consumed by the Scan) and also on
+        /// manager loss / Reconfigure so the periodic safety-net sort sees a clean
+        /// hierarchy without stale entries.
+        /// </summary>
+        private void ClearFreshInstanceSet()
+        {
+            _freshManagerKey = 0;
+            _freshInstanceIdsByManager.Clear();
+        }
+
+        /// <summary>
         /// UpdateMoodles 后置调用：刷新完成边界。
         /// 安排下一帧扫描/排序/提醒，避免同一刷新帧仍包含待销毁旧节点。
         /// </summary>
@@ -176,6 +282,13 @@ namespace HealthAutoArrange.Plugin
 
             UpdateCaptureBoundary(manager);
 
+            // v1.2.0: bind the fresh-instance filter to the current manager. AddMoodle
+            // postfix has been populating this set during AddAllMoodles (which runs
+            // BEFORE this UpdateMoodles postfix). The Scan below will use this set to
+            // skip Destroy-pending nodes from ClearMoodles.
+            try { _freshManagerKey = manager.GetInstanceID(); }
+            catch { _freshManagerKey = 0; }
+
             // 刷新边界：即使关闭排序，也继续观察 Moodle 并驱动已启用的提醒；
             // 只有实际 UI 重排受主开关控制。
             if (_runtime.Enabled) _lastSignature = string.Empty;
@@ -191,6 +304,12 @@ namespace HealthAutoArrange.Plugin
             {
                 ProcessRefresh();
             }
+
+            // v1.2.0: clear the fresh-instance set now that ProcessRefresh has consumed
+            // it. The next AddMoodle cycle (next UpdateMoodles call ~0.5s later) will
+            // rebuild the set via AddMoodle postfix. Clearing here prevents stale
+            // instance IDs from leaking into the periodic safety-net sort.
+            ClearFreshInstanceSet();
         }
 
         /// <summary>
@@ -218,6 +337,44 @@ namespace HealthAutoArrange.Plugin
             if (_scheduler.TryDeferred(Time.frameCount))
             {
                 ProcessRefresh();
+            }
+
+            // v1.2.0 periodic safety-net re-sort. Independent of the game's
+            // UpdateMoodles cycle (which fires ~ every 0.5s and may be skipped or
+            // operate on a half-destroyed hierarchy). The periodic pass runs on
+            // every Plugin.Update tick where the timer has elapsed AND the manager
+            // is alive AND sorting is enabled. Because Plugin.Update typically fires
+            // on a different Unity frame than the game's ClearMoodles+AddAllMoodles,
+            // Destroy has completed by the time we scan here, so the fresh-set
+            // filter (if still populated) plus the child == null filter give us a
+            // clean view of only the live moodles. This is what fixes the v1.1.x
+            // regression where the sort only stuck at startup.
+            try
+            {
+                if (_runtime.Enabled
+                    && !ReferenceEquals(_manager, null)
+                    && _manager != null
+                    && Time.realtimeSinceStartup >= _nextPeriodicResortRealtime)
+                {
+                    _nextPeriodicResortRealtime = Time.realtimeSinceStartup + PeriodicResortIntervalSeconds;
+                    _periodicResortCount++;
+                    // Invalidate the signature so ProcessRefresh actually re-evaluates,
+                    // even if the previous UpdateMoodles postfix already cached it.
+                    _lastSignature = string.Empty;
+                    // Use TryRunNow so the periodic pass runs immediately even when the
+                    // scheduler has no pending task (the common case between game
+                    // refreshes). The re-entrancy guard inside ProcessRefresh handles
+                    // the rare case where OnMoodlesUpdated is still on the stack.
+                    _scheduler.TryRunNow();
+                    ProcessRefresh();
+                    // The periodic pass consumes the fresh set; clear it so the next
+                    // cycle starts clean.
+                    ClearFreshInstanceSet();
+                }
+            }
+            catch (Exception ex)
+            {
+                LogThrottled($"Periodic safety-net re-sort failed: {ex.Message}");
             }
 
             // Periodic reminder cadence must not depend on how often the game chooses to rebuild
@@ -323,6 +480,9 @@ namespace HealthAutoArrange.Plugin
             _lastSignature = string.Empty;
             UpdatePresentSnapshot(new List<MoodleVisual>());
             _nextReminderTickRealtime = 0f;
+            // v1.2.0: also drop the fresh-instance set so stale ids cannot leak
+            // into the next manager's scan.
+            ClearFreshInstanceSet();
         }
 
         /// <summary>
@@ -363,6 +523,21 @@ namespace HealthAutoArrange.Plugin
                 }
 
                 _log?.Invoke(LogLevel.Info, $"Pending=False, Manager={(_manager != null ? _manager.name : "null")}");
+                _log?.Invoke(LogLevel.Info, $"v1.2.1 stats: AddMoodlePostfixCount={_addMoodlePostfixCount}, PeriodicResortCount={_periodicResortCount}, SiblingFallbackCount={_siblingSortFallbackCount}, AnchoredWriteCount={_anchoredSortWriteCount}, FreshSetSize={(_freshManagerKey != 0 && _freshInstanceIdsByManager.TryGetValue(_freshManagerKey, out var fs) ? fs.Count : 0)}");
+                if (_manager != null)
+                {
+                    Transform moodlesContainer = null;
+                    try { moodlesContainer = _manager.moodles; } catch { }
+                    if (moodlesContainer != null)
+                    {
+                        _log?.Invoke(LogLevel.Info, $"Manager.moodles childCount={moodlesContainer.childCount}");
+                        bool hasHLG = false, hasVLG = false, hasGLG = false;
+                        try { hasHLG = moodlesContainer.GetComponent<HorizontalLayoutGroup>() != null; } catch { }
+                        try { hasVLG = moodlesContainer.GetComponent<VerticalLayoutGroup>() != null; } catch { }
+                        try { hasGLG = moodlesContainer.GetComponent<GridLayoutGroup>() != null; } catch { }
+                        _log?.Invoke(LogLevel.Info, $"LayoutGroup on moodles container: H={hasHLG} V={hasVLG} G={hasGLG}");
+                    }
+                }
                 var visuals = _manager != null ? Scan(_manager) : new List<MoodleVisual>();
                 if (visuals.Count == 0)
                 {
@@ -435,6 +610,20 @@ namespace HealthAutoArrange.Plugin
                     var moodle = child.GetComponent<Moodle>();
                     if (moodle == null) continue;
 
+                    // v1.2.0 fresh-instance filter: when AddMoodle postfix has populated a
+                    // fresh set for the current manager, only admit children whose
+                    // GetInstanceID() is in that set. This filters Destroy-pending nodes
+                    // that Unity's fake-null check may miss within the same UpdateMoodles
+                    // call (ClearMoodles calls Object.Destroy which is deferred to end of
+                    // frame; the C# wrapper may still be non-null during the postfix).
+                    if (_freshManagerKey != 0
+                        && _freshInstanceIdsByManager.TryGetValue(_freshManagerKey, out var freshSet)
+                        && freshSet != null && freshSet.Count > 0
+                        && !freshSet.Contains(child.GetInstanceID()))
+                    {
+                        continue;
+                    }
+
                     var runtimeId = moodle.type;
                     if (string.IsNullOrWhiteSpace(runtimeId)) runtimeId = child.name;
                     var rect = child as RectTransform;
@@ -493,13 +682,24 @@ namespace HealthAutoArrange.Plugin
                 }
                 else
                 {
-                    // Sibling reordering is only deterministic when this parent is a single Moodle
-                    // row with no unobserved/inactive/non-Moodle direct children. In a mixed parent,
-                    // SetSiblingIndex necessarily shifts those other children and every write can
-                    // synchronously invoke hierarchy callbacks. Prefer one missed arrangement over
-                    // mutating an unknown/shared UI topology.
-                    LogThrottled("Skipped sibling sorting because the Moodle parent has mixed or unstable direct children.");
-                    continue;
+                    // v1.2.1 realistic fix for the "game overwrites mod order" regression.
+                    //
+                    // Root cause: under CU 7.0.1, AddAllMoodles may Instantiate a bonus
+                    // "+N" GameObject into manager.moodles (no Moodle component) when side
+                    // moodles exist, AND main+side moodles share the same parent. Both conditions
+                    // make CanSafelyUseSiblingOrder fail (childCount != members.Count and mixed
+                    // IsSide). The v1.2.0 code silently `continue`d here, so the sort was skipped
+                    // every cycle -> the user saw the game's source-order positions "overwrite"
+                    // the mod's startup sort. This is the regression reported by the user.
+                    //
+                    // Fix: fall back to AnchoredPosition, which writes anchoredPosition.x only
+                    // (no sibling mutation). Safe regardless of sibling topology and bonus/
+                    // decoration children, and persists in CU because manager.moodles is a plain
+                    // Transform (decompile confirms no LayoutGroup component is added in code;
+                    // if a scene/prefab adds one, this fallback still produces best-effort
+                    // ordering each cycle rather than a silent no-op).
+                    _siblingSortFallbackCount++;
+                    changed = ApplyAnchoredSlots(members);
                 }
 
                 // A write in the first parent group can synchronously trigger another Moodle refresh.
@@ -515,6 +715,7 @@ namespace HealthAutoArrange.Plugin
                 // 避免游戏每帧重建图标导致的逐帧日志堆积。
                 if (changed)
                 {
+                    _anchoredSortWriteCount++;
                     _log?.Invoke(LogLevel.Debug, $"Arranged {members.Count} moodles ({mode}).");
                 }
             }
