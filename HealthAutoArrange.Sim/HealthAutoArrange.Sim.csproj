@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <RootNamespace>HealthAutoArrange.Sim</RootNamespace>
+    <AssemblyName>HealthAutoArrange.Sim</AssemblyName>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <!--
+    v1.2.2 behavior simulator ("tests pass is not proof it works").
+
+    This project compiles the REAL UnityUiAdapter.cs (shared source, unchanged) against a
+    fake UnityEngine implementation, then drives it with a faithful re-implementation of
+    the decompiled Casualties: Unknown MoodleManager rebuild cycle
+    (0.5s timer -> ClearMoodles [deferred Object.Destroy] -> AddAllMoodles [AddMoodle chain
+    + bonus "+N"]). Harmony patch boundaries are simulated by invoking the exact adapter
+    callbacks GamePatches routes (prefix/postfix per AddMoodle, ClearMoodles postfix,
+    AddAllMoodles postfix, UpdateMoodles postfix).
+
+    Scenarios assert the mod order holds at the END OF EVERY FRAME, including the rebuild
+    frame itself, under both Unity fake-null semantics:
+      - ImmediateFakeNull=true  (== null returns true right after Destroy() is called)
+      - ImmediateFakeNull=false (== null stays false until the end-of-frame destroy pass;
+        this is the pessimistic model where destroy-pending "ghosts" are indistinguishable
+        from live moodles during the rebuild frame).
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\HealthAutoArrange.Core\HealthAutoArrange.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\HealthAutoArrange.Plugin\UnityUiAdapter.cs" Link="Linked\UnityUiAdapter.cs" />
+    <Compile Include="..\HealthAutoArrange.Plugin\ReminderDispatcher.cs" Link="Linked\ReminderDispatcher.cs" />
+  </ItemGroup>
+
+</Project>

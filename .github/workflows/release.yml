@@ -14,6 +14,8 @@ jobs:
     runs-on: windows-latest
     env:
       GAME_REFS_URL: ${{ secrets.GAME_REFS_URL }}
+      RELEASE_OWNER: purrfecto114-lgtm
+      RELEASE_REPO: HealthAutoArrange
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -77,7 +79,12 @@ jobs:
           } else {
             $version = 'manual'
           }
-          $zipPath = Join-Path $env:RUNNER_TEMP "HealthAutoArrange-$version.zip"
+          # v1.2.2: single canonical asset name carrying the target game version.
+          # The mod targets Casualties: Unknown Demo 7.0.1 (Steam build 24774057).
+          # Older releases also published a stub-built "HealthAutoArrange-<ver>.zip"
+          # without the game-version suffix, which made it ambiguous which zip to
+          # install. There is now exactly ONE zip per release.
+          $zipPath = Join-Path $env:RUNNER_TEMP "HealthAutoArrange-$version-v701.zip"
           Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zipPath
           Write-Host "Package=$zipPath"
           Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_ZIP=$zipPath"
@@ -105,17 +112,19 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HealthAutoArrange-${{ env.RELEASE_VERSION }}
+          name: HealthAutoArrange-${{ env.RELEASE_VERSION }}-v701
           path: ${{ env.RELEASE_ZIP }}
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          # v1.2.2: the release ships exactly one zip (built for Demo 7.0.1) plus the
+          # in-game updater manifest. No legacy/stub-built zips, no detached DLLs —
+          # the zip already contains both DLLs.
           files: |
             ${{ env.RELEASE_ZIP }}
             ${{ env.UPDATE_MANIFEST }}
-          generate_release_notes: true
 
       - name: Publish update manifest to update-dist branch
         if: startsWith(github.ref, 'refs/tags/')

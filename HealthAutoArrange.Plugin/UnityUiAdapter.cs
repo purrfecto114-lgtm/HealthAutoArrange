@@ -85,6 +85,57 @@ namespace HealthAutoArrange.Plugin
         private long _siblingSortFallbackCount;
         private long _anchoredSortWriteCount;
 
+        // --- v1.2.2 creation-time positioning + per-frame watchdog + ghost-proof scans ---
+        // Root cause addressed (user report: "the two orders still take turns, just less
+        // often"): v1.2.1 hooked only UpdateMoodles and corrected positions AFTER THE FACT
+        // (same-frame postfix + 4 Hz net). Three real defects combined into the visible
+        // alternation:
+        //   (a) Any rebuild path that did not go through UpdateMoodles rendered the game's
+        //       source order until the next correction (up to 250 ms with the 4 Hz net).
+        //   (b) The 4 Hz net could fire in the same frame as a rebuild, after the fresh-set
+        //       had been consumed: the scan then saw the destroy-pending OLD children as
+        //       live members (Object.Destroy defers removal to end of frame, so Unity's
+        //       fake-null check cannot filter them), duplicating slot values and writing
+        //       overlapping/offset layouts every cycle.
+        //   (c) AddMoodle no-ops (chippedOnly && WorldGeneration.unchipped) made the
+        //       unconditional "last child" fresh-id record admit a ghost from the previous
+        //       cycle.
+        // v1.2.2 makes the mod's order authoritative at creation time and verifies it
+        // every frame:
+        //   1. AddMoodle postfix repositions the just-created moodle immediately
+        //      (incremental re-sort of this cycle's members; anchoredPosition.x only, the
+        //      pop-in animation on y is untouched). Rendering happens at frame end, so the
+        //      game's creation order is never displayed - regardless of which rebuild path
+        //      is running.
+        //   2. AddAllMoodles postfix (new lowest-level boundary) finalizes the full sort
+        //      the same frame; UpdateMoodles postfix dedupes against it per manager+frame.
+        //   3. A per-frame watchdog verifies cached (rect, expected x) pairs. Any drift -
+        //      unknown reposition path, rebuild, piecemeal add - triggers a full re-sort
+        //      within one frame (<= 16 ms at 60 fps).
+        //   4. All scans are ghost-proof: while a rebuild is in progress this frame, scans
+        //      either use the fresh-instance filter or are deferred (frame gate).
+        // -----------------------------------------------------------------------------
+        private readonly List<MoodleVisual> _cycleMembers = new List<MoodleVisual>();
+        private int _cycleManagerKey;
+        private int _freshInstanceFrame;  // frame in which the fresh set was last populated
+        private int _lastClearFrame = -1;  // frame of the most recent ClearMoodles postfix
+        private int _lastClearManagerKey;
+        private int _lastFinalizeFrame = -1;  // v1.2.2: same-frame finalize dedupe (per manager)
+        private int _lastFinalizeManagerKey;
+        private readonly List<RectTransform> _watchdogRects = new List<RectTransform>();
+        private readonly List<float> _watchdogExpectedX = new List<float>();
+        private Transform _watchdogContainer;
+        private int _watchdogChildCount = -1;
+        private long _creationTimePositionCount;  // diagnostics: creation-time incremental writes
+        private long _watchdogCorrectionCount;    // diagnostics: watchdog-triggered full resorts
+        private long _moodlesClearedCount;        // diagnostics: ClearMoodles postfix invocations
+        // Prefix stash used by OnMoodleCreated to detect AddMoodle no-op calls
+        // (chippedOnly && WorldGeneration.unchipped creates nothing; the "last child"
+        // is then a leftover, possibly a destroy-pending ghost from the previous cycle).
+        private int _pendingAddManagerKey;
+        private string _pendingAddExpectedType;
+        private int _pendingAddChildCountBefore = -1;
+
         public UnityUiAdapter(
             SortPlan plan,
             ReminderEngine reminders,
@@ -144,6 +195,9 @@ namespace HealthAutoArrange.Plugin
             // v1.2.0: also clear the fresh-set so the next scan picks up the new plan
             // against the live hierarchy without stale instance-id filters.
             ClearFreshInstanceSet();
+            // v1.2.2: the watchdog plan is bound to the previous plan's expected slots;
+            // rebuild it from the next sort pass.
+            InvalidateWatchdog();
 
             // Keep the last confirmed presence snapshot and request a fresh scan. The master UI
             // toggle controls sorting only; reminder rules remain independent as stated in the GUI.
@@ -177,6 +231,27 @@ namespace HealthAutoArrange.Plugin
             try
             {
                 _captures.Capture(manager, intensity, icon, name, desc, critical, chippedOnly, manager.sideMoodles);
+                // v1.2.2: stash the expected post-conditions of THIS call so the postfix can
+                // detect the no-op path (AddMoodle returns without creating a child when
+                // chippedOnly && WorldGeneration.unchipped). The game sets moodle.type =
+                // icon + intensity on creation; childCount grows by exactly one.
+                _pendingAddExpectedType = (icon ?? string.Empty) + intensity.ToString();
+                _pendingAddChildCountBefore = -1;
+                _pendingAddManagerKey = 0;
+                try
+                {
+                    var moodles = manager != null ? manager.moodles : null;
+                    if (moodles != null)
+                    {
+                        _pendingAddChildCountBefore = moodles.childCount;
+                        _pendingAddManagerKey = manager.GetInstanceID();
+                    }
+                }
+                catch
+                {
+                    // Manager state unavailable: leave the stash invalid; OnMoodleCreated
+                    // then falls back to trusting the last child (v1.2.1 behavior).
+                }
             }
             catch (Exception ex)
             {
@@ -195,22 +270,46 @@ namespace HealthAutoArrange.Plugin
             _addMoodlePostfixCount++;
             try
             {
-                if (manager == null) return;
+                if (manager == null) { ClearPendingAdd(); return; }
                 Transform moodles;
                 try { moodles = manager.moodles; }
-                catch { return; }
-                if (moodles == null) return;
+                catch { ClearPendingAdd(); return; }
+                if (moodles == null) { ClearPendingAdd(); return; }
 
                 int key;
                 try { key = manager.GetInstanceID(); }
-                catch { return; }
-                if (key == 0) return;
+                catch { ClearPendingAdd(); return; }
+                if (key == 0) { ClearPendingAdd(); return; }
 
                 // The just-created moodle is the last child of manager.moodles.
                 int lastIdx = moodles.childCount - 1;
-                if (lastIdx < 0) return;
+                if (lastIdx < 0) { ClearPendingAdd(); return; }
                 var newChild = moodles.GetChild(lastIdx);
-                if (newChild == null) return;  // already destroyed by another Mod
+                if (newChild == null) { ClearPendingAdd(); return; }  // already destroyed by another Mod
+
+                // v1.2.2: validate that AddMoodle actually created a child on THIS call.
+                // AddMoodle no-ops when chippedOnly && WorldGeneration.unchipped; the last
+                // child is then a leftover from a previous call (possibly a destroy-pending
+                // ghost). v1.2.1 recorded it unconditionally, which could admit a ghost
+                // into the fresh set and misalign slot assignment for the whole cycle.
+                bool created;
+                if (_pendingAddManagerKey == key && _pendingAddChildCountBefore >= 0)
+                {
+                    created = moodles.childCount == _pendingAddChildCountBefore + 1;
+                    if (created)
+                    {
+                        var candidate = newChild.GetComponent<Moodle>();
+                        created = candidate != null && candidate.type == _pendingAddExpectedType;
+                    }
+                }
+                else
+                {
+                    // Prefix stash unavailable (patch pair split): fall back to v1.2.1
+                    // behavior of trusting the last child.
+                    created = true;
+                }
+                ClearPendingAdd();
+                if (!created) return;
 
                 int childId;
                 try { childId = newChild.GetInstanceID(); }
@@ -224,6 +323,7 @@ namespace HealthAutoArrange.Plugin
                     _freshInstanceIdsByManager.Clear();
                 }
                 _freshManagerKey = key;
+                _freshInstanceFrame = Time.frameCount;
 
                 if (!_freshInstanceIdsByManager.TryGetValue(key, out var set) || set == null)
                 {
@@ -231,11 +331,233 @@ namespace HealthAutoArrange.Plugin
                     _freshInstanceIdsByManager[key] = set;
                 }
                 set.Add(childId);
+
+                // v1.2.2 creation-time positioning: while a rebuild is running in this
+                // frame (ClearMoodles postfix fired), the cycle list holds every moodle
+                // created this cycle, so an incremental re-sort can place each moodle at
+                // its mod slot IMMEDIATELY - before the frame is rendered. Piecemeal adds
+                // outside a rebuild (not observed in the decompiled game, but kept safe)
+                // skip this and rely on the per-frame watchdog, because a partial cycle
+                // list must never be used to write slots (it could overlap pre-existing
+                // moodles that are not part of the cycle).
+                if (_runtime.Enabled && _lastClearFrame == Time.frameCount && _lastClearManagerKey == key)
+                {
+                    var newMoodle = newChild.GetComponent<Moodle>();
+                    TryPositionCycleMembers(key, newChild, newMoodle);
+                }
             }
             catch (Exception ex)
             {
-                LogThrottled($"OnMoodleCreated fresh-id capture failed: {ex.Message}");
+                LogThrottled($"OnMoodleCreated failed: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// v1.2.2: ClearMoodles postfix callback. ClearMoodles runs at the START of every
+        /// rebuild cycle: old nodes are destroy-pending (Object.Destroy removes them at the
+        /// end of the frame) and new nodes do not exist yet. Reset the per-cycle
+        /// accumulation and the watchdog plan so the subsequent AddMoodle postfixes rebuild
+        /// both from zero. Also marks the frame as "rebuild in progress" for the scan gate.
+        /// </summary>
+        public void OnMoodlesCleared(MoodleManager manager)
+        {
+            _moodlesClearedCount++;
+            try
+            {
+                if (manager == null) return;
+                int key;
+                try { key = manager.GetInstanceID(); }
+                catch { key = 0; }
+                _lastClearFrame = Time.frameCount;
+                _lastClearManagerKey = key;
+
+                // Bind the manager early so the watchdog/periodic paths can act on the
+                // manager that is about to rebuild, even before the finalize boundary.
+                if (key != 0 && !ReferenceEquals(_manager, manager))
+                {
+                    _captureBoundaryByManager.Clear();
+                    _captureFloorSequence = 0;
+                    _manager = manager;
+                }
+
+                _cycleMembers.Clear();
+                _cycleManagerKey = 0;
+                ClearFreshInstanceSet();
+                InvalidateWatchdog();
+            }
+            catch (Exception ex)
+            {
+                LogThrottled($"OnMoodlesCleared failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>Clear the prefix stash used to validate OnMoodleCreated.</summary>
+        private void ClearPendingAdd()
+        {
+            _pendingAddManagerKey = 0;
+            _pendingAddExpectedType = null;
+            _pendingAddChildCountBefore = -1;
+        }
+
+        /// <summary>
+        /// v1.2.2 creation-time positioning: incremental re-sort of the current cycle's
+        /// members. Called from OnMoodleCreated while a rebuild is in progress, i.e. inside
+        /// the game's own AddMoodle call stack. Writes anchoredPosition.x only - the
+        /// game's pop-in animation (y offset + scale) is left untouched. Slots are the
+        /// ascending set of the row's current x positions: the game assigns every new
+        /// moodle a fresh sequential slot, and permuting members among their own slots
+        /// keeps the slot set invariant, so the final layout after the last AddMoodle of
+        /// the cycle is exactly the mod order. Rendering happens at frame end, so the
+        /// user never sees the game's creation order.
+        /// </summary>
+        private void TryPositionCycleMembers(int managerKey, Transform newChild, Moodle newMoodle)
+        {
+            try
+            {
+                var rect = newChild as RectTransform;
+                if (rect == null || newMoodle == null) return;
+                var runtimeId = newMoodle.type;
+                if (string.IsNullOrWhiteSpace(runtimeId)) runtimeId = newChild.name;
+
+                if (_cycleManagerKey != 0 && _cycleManagerKey != managerKey)
+                {
+                    _cycleMembers.Clear();
+                }
+                _cycleManagerKey = managerKey;
+                _cycleMembers.Add(new MoodleVisual
+                {
+                    Component = newChild,
+                    RectTransform = rect,
+                    RuntimeId = runtimeId,
+                    IsSide = newMoodle.isSide,
+                    SiblingIndex = newChild.GetSiblingIndex(),
+                    OriginalAnchoredPosition = rect.anchoredPosition,
+                    Capture = null
+                });
+                if (_cycleMembers.Count < 2) return;
+
+                var orders = PlanRows(_cycleMembers);
+                bool anyWrite = false;
+                foreach (var kv in orders)
+                {
+                    var rowMembers = _cycleMembers
+                        .Where(v => v.IsSide == kv.Key)
+                        .OrderBy(v => v.SiblingIndex)
+                        .ToList();
+                    if (rowMembers.Any(v => v.RectTransform == null)) continue;
+
+                    var slots = rowMembers.Select(v => v.RectTransform.anchoredPosition.x).OrderBy(x => x).ToList();
+                    var order = kv.Value;
+                    for (int i = 0; i < order.Count && i < slots.Count; i++)
+                    {
+                        var target = rowMembers[order[i]];
+                        var current = target.RectTransform.anchoredPosition;
+                        if (Mathf.Abs(current.x - slots[i]) > 0.001f)
+                        {
+                            target.RectTransform.anchoredPosition = new Vector2(slots[i], current.y);
+                            anyWrite = true;
+                        }
+                    }
+                }
+                if (anyWrite) _creationTimePositionCount++;
+            }
+            catch (Exception ex)
+            {
+                LogThrottled($"Creation-time positioning failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// v1.2.2 per-frame position watchdog: verifies the cached (rect, expected x)
+        /// plan against the live hierarchy every frame. Any drift - an unknown game
+        /// reposition path, a rebuild we did not see, a piecemeal add/remove - triggers a
+        /// full re-scan and re-sort within the same frame. Steady state is ~a dozen null
+        /// checks and float compares per frame; no writes happen when positions match.
+        /// </summary>
+        private void RunWatchdog()
+        {
+            if (_watchdogRects.Count == 0) return;
+            if (_lastClearFrame == Time.frameCount) return;  // rebuild in progress this frame
+            if (_processingRefresh) return;
+
+            Transform container;
+            try { container = _manager.moodles; }
+            catch { InvalidateWatchdog(); return; }
+            if (container == null || !ReferenceEquals(container, _watchdogContainer))
+            {
+                RequestFullRefresh("container changed");
+                return;
+            }
+            if (container.childCount != _watchdogChildCount)
+            {
+                RequestFullRefresh("child count drift");
+                return;
+            }
+            for (int i = 0; i < _watchdogRects.Count; i++)
+            {
+                var rect = _watchdogRects[i];
+                if (rect == null)
+                {
+                    // Destroyed since the plan was built (fake-null): full refresh.
+                    RequestFullRefresh("member destroyed");
+                    return;
+                }
+                var currentX = rect.anchoredPosition.x;
+                if (Mathf.Abs(currentX - _watchdogExpectedX[i]) > 0.5f)
+                {
+                    RequestFullRefresh("position drift");
+                    return;
+                }
+            }
+        }
+
+        private void RequestFullRefresh(string reason)
+        {
+            _watchdogCorrectionCount++;
+            _lastSignature = string.Empty;
+            LogThrottled($"Watchdog full refresh: {reason}");
+            ProcessRefresh();  // re-entrancy guarded; Scan is ghost-proof via the frame gate
+        }
+
+        /// <summary>
+        /// Rebuild the watchdog plan from a completed sort pass. <paramref name="complete"/>
+        /// is false when the scan ran with the fresh-instance filter during a rebuild
+        /// frame: the container's childCount then still includes destroy-pending ghosts,
+        /// so the count is marked unknown (-1) and the first clean-frame watchdog pass
+        /// triggers one full refresh to finalize the plan.
+        /// </summary>
+        private void RebuildWatchdogPlan(List<MoodleVisual> visuals, bool complete)
+        {
+            _watchdogRects.Clear();
+            _watchdogExpectedX.Clear();
+            _watchdogContainer = null;
+            _watchdogChildCount = -1;
+            try
+            {
+                if (_manager == null) return;
+                var container = _manager.moodles;
+                if (container == null) return;
+                _watchdogContainer = container;
+                _watchdogChildCount = complete ? container.childCount : -1;
+                foreach (var v in visuals)
+                {
+                    if (v.RectTransform == null) continue;
+                    _watchdogRects.Add(v.RectTransform);
+                    _watchdogExpectedX.Add(v.RectTransform.anchoredPosition.x);
+                }
+            }
+            catch
+            {
+                InvalidateWatchdog();
+            }
+        }
+
+        private void InvalidateWatchdog()
+        {
+            _watchdogRects.Clear();
+            _watchdogExpectedX.Clear();
+            _watchdogContainer = null;
+            _watchdogChildCount = -1;
         }
 
         /// <summary>
@@ -248,6 +570,7 @@ namespace HealthAutoArrange.Plugin
         {
             _freshManagerKey = 0;
             _freshInstanceIdsByManager.Clear();
+            _freshInstanceFrame = 0;
         }
 
         /// <summary>
@@ -267,6 +590,39 @@ namespace HealthAutoArrange.Plugin
             {
                 UpdateCaptureBoundary(manager);
                 return;
+            }
+
+            // v1.2.2: same-frame, same-manager finalize dedupe. UpdateMoodles calls
+            // ClearMoodles + AddAllMoodles, so BOTH postfixes funnel here within one
+            // rebuild: AddAllMoodles postfix arrives first and finalizes; the UpdateMoodles
+            // postfix must not rescan - at that point the fresh-instance filter has been
+            // consumed and the still-destroy-pending old children would be admitted as
+            // ghost members, misaligning the slot assignment every cycle.
+            int finalizeKey;
+            try { finalizeKey = manager.GetInstanceID(); }
+            catch { finalizeKey = 0; }
+            if (finalizeKey != 0
+                && finalizeKey == _lastFinalizeManagerKey
+                && _lastFinalizeFrame == Time.frameCount)
+            {
+                UpdateCaptureBoundary(manager);
+                return;
+            }
+            _lastFinalizeManagerKey = finalizeKey;
+            _lastFinalizeFrame = Time.frameCount;
+
+            // v1.2.2: mark this frame as a rebuild frame for the scan gate. AddMoodle
+            // postfixes have populated the fresh set during AddAllMoodles, i.e. new nodes
+            // exist and destroy-pending ghosts are still in the hierarchy. Even when the
+            // ClearMoodles postfix itself is unavailable (degraded patch set), this keeps
+            // every later same-frame scan (4 Hz net, watchdog, F8/F9) from admitting
+            // ghosts once the finalize consumes the fresh set.
+            if (_freshManagerKey != 0
+                && _freshInstanceIdsByManager.TryGetValue(_freshManagerKey, out var rebuildSet)
+                && rebuildSet != null && rebuildSet.Count > 0)
+            {
+                _lastClearFrame = Time.frameCount;
+                _lastClearManagerKey = finalizeKey;
             }
 
             // Manager normally is singular. Clear per-manager sequence boundaries when the actual
@@ -334,9 +690,38 @@ namespace HealthAutoArrange.Plugin
                 ResetLostManagerState();
             }
 
+            // v1.2.2: the fresh-instance set is only meaningful within the rebuild frame it
+            // was populated in. If a rebuild finalized without consuming it (piecemeal
+            // AddMoodle without AddAllMoodles, or a degraded patch set), drop it as soon as
+            // the frame rolls over: ghosts are gone by then and an unfiltered scan is safe,
+            // while a stale filter would hide live moodles from later scans.
+            if (_freshManagerKey != 0
+                && _freshInstanceFrame != 0
+                && Time.frameCount > _freshInstanceFrame)
+            {
+                ClearFreshInstanceSet();
+            }
+
             if (_scheduler.TryDeferred(Time.frameCount))
             {
                 ProcessRefresh();
+            }
+
+            // v1.2.2 per-frame position watchdog: runs before the periodic net so drift is
+            // corrected within one frame (<= 16 ms at 60 fps) instead of waiting for the
+            // 0.25 s periodic timer.
+            try
+            {
+                if (_runtime.Enabled
+                    && !ReferenceEquals(_manager, null)
+                    && _manager != null)
+                {
+                    RunWatchdog();
+                }
+            }
+            catch (Exception ex)
+            {
+                LogThrottled($"Watchdog failed: {ex.Message}");
             }
 
             // v1.2.0 periodic safety-net re-sort. Independent of the game's
@@ -460,7 +845,16 @@ namespace HealthAutoArrange.Plugin
                     _lastSignature = string.Empty;
                     return;
                 }
-                _lastSignature = BuildSignature(Scan(_manager));
+                // v1.2.2: the post-sort rescan feeds both the change signature and the
+                // per-frame watchdog plan. When this scan ran with the fresh-instance filter
+                // (rebuild frame), childCount still includes ghosts, so the plan is marked
+                // incomplete and finalized by the first clean-frame watchdog pass.
+                var postSortVisuals = Scan(_manager);
+                _lastSignature = BuildSignature(postSortVisuals);
+                bool scanWasFiltered = _freshManagerKey != 0
+                    && _freshInstanceIdsByManager.TryGetValue(_freshManagerKey, out var planSet)
+                    && planSet != null && planSet.Count > 0;
+                RebuildWatchdogPlan(postSortVisuals, complete: !scanWasFiltered);
             }
             catch (Exception ex)
             {
@@ -483,6 +877,14 @@ namespace HealthAutoArrange.Plugin
             // v1.2.0: also drop the fresh-instance set so stale ids cannot leak
             // into the next manager's scan.
             ClearFreshInstanceSet();
+            // v1.2.2: drop the cycle accumulation and watchdog plan bound to the lost manager.
+            _cycleMembers.Clear();
+            _cycleManagerKey = 0;
+            _lastClearFrame = -1;
+            _lastClearManagerKey = 0;
+            _lastFinalizeFrame = -1;
+            _lastFinalizeManagerKey = 0;
+            InvalidateWatchdog();
         }
 
         /// <summary>
@@ -524,6 +926,7 @@ namespace HealthAutoArrange.Plugin
 
                 _log?.Invoke(LogLevel.Info, $"Pending=False, Manager={(_manager != null ? _manager.name : "null")}");
                 _log?.Invoke(LogLevel.Info, $"v1.2.1 stats: AddMoodlePostfixCount={_addMoodlePostfixCount}, PeriodicResortCount={_periodicResortCount}, SiblingFallbackCount={_siblingSortFallbackCount}, AnchoredWriteCount={_anchoredSortWriteCount}, FreshSetSize={(_freshManagerKey != 0 && _freshInstanceIdsByManager.TryGetValue(_freshManagerKey, out var fs) ? fs.Count : 0)}");
+                _log?.Invoke(LogLevel.Info, $"v1.2.2 stats: MoodlesClearedCount={_moodlesClearedCount}, CreationTimePositionCount={_creationTimePositionCount}, WatchdogCorrectionCount={_watchdogCorrectionCount}, Frame={Time.frameCount}, LastClearFrame={_lastClearFrame}, LastFinalizeFrame={_lastFinalizeFrame}, WatchdogPlanSize={_watchdogRects.Count}");
                 if (_manager != null)
                 {
                     Transform moodlesContainer = null;
@@ -588,6 +991,29 @@ namespace HealthAutoArrange.Plugin
                 throw new InvalidOperationException("MoodleManager.moodles access failed.", ex);
             }
             if (container == null) return new List<MoodleVisual>();
+
+            // v1.2.2 ghost-proof scan gate: while a rebuild is in progress this frame,
+            // ClearMoodles' Object.Destroy has not removed the old children yet (removal is
+            // deferred to the end of the frame, so Unity's fake-null check cannot detect
+            // them). Scanning without the fresh-instance filter would admit those ghosts
+            // as live members, duplicating slot values and misaligning the sort. When the
+            // fresh filter is not active, refuse to scan a hierarchy in a rebuild frame;
+            // callers treat this like any other unstable-scan failure and retry on a clean
+            // frame.
+            bool freshFilterActive = _freshManagerKey != 0
+                && _freshInstanceIdsByManager.TryGetValue(_freshManagerKey, out var gateSet)
+                && gateSet != null && gateSet.Count > 0;
+            if (!freshFilterActive && _lastClearFrame == Time.frameCount)
+            {
+                int scanManagerKey;
+                try { scanManagerKey = manager.GetInstanceID(); }
+                catch { scanManagerKey = 0; }
+                bool clearedThisManager = _lastClearManagerKey == 0 || _lastClearManagerKey == scanManagerKey;
+                if (clearedThisManager)
+                {
+                    throw new InvalidOperationException("Moodle scan deferred: rebuild in progress this frame (destroy-pending children present).");
+                }
+            }
 
             // Never turn a failed/partial hierarchy enumeration into a valid snapshot. A partial
             // snapshot is worse than skipping one refresh because it can drive reminders from false
@@ -874,17 +1300,27 @@ namespace HealthAutoArrange.Plugin
                 var rowMembers = members.Where(v => v.IsSide == kv.Key).OrderBy(v => v.SiblingIndex).ToList();
                 if (rowMembers.Any(v => v.RectTransform == null)) continue;
 
-                var slots = rowMembers.Select(v => v.OriginalAnchoredPosition).ToList();
+                // v1.2.2 CRITICAL FIX: the slot set MUST be the row's ascending x values,
+                // NOT the x values in sibling order. The original code took
+                // OriginalAnchoredPosition in sibling order, which is ascending only for
+                // a freshly game-created row. On every later pass (periodic net,
+                // watchdog refresh, second finalize) the members' positions are already
+                // mod-sorted, so sibling order is NOT ascending: using it as the slot
+                // table permuted members against a scrambled slot list and WROTE A
+                // GARBAGE LAYOUT, which the next rebuild "fixed" and the next net broke
+                // again - the exact user-visible "two orders taking turns" regression
+                // (found by the v1.2.2 behavior simulator, reproduced bit-for-bit).
+                var slotXs = rowMembers.Select(v => v.OriginalAnchoredPosition.x).OrderBy(x => x).ToList();
                 var order = kv.Value;
-                for (int i = 0; i < order.Count && i < slots.Count; i++)
+                for (int i = 0; i < order.Count && i < slotXs.Count; i++)
                 {
                     var target = rowMembers[order[i]];
-                    var slot = slots[i];
+                    var slotX = slotXs[i];
                     var current = target.RectTransform.anchoredPosition;
                     // 只写 x（槽位），保留 y；x 已正确时不做多余写入。
-                    if (Mathf.Abs(current.x - slot.x) > 0.001f)
+                    if (Mathf.Abs(current.x - slotX) > 0.001f)
                     {
-                        target.RectTransform.anchoredPosition = new Vector2(slot.x, current.y);
+                        target.RectTransform.anchoredPosition = new Vector2(slotX, current.y);
                         anyWrite = true;
                         if (_scheduler.HasPending) return anyWrite;
                     }

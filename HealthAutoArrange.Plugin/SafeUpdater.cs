@@ -27,6 +27,12 @@ namespace HealthAutoArrange.Plugin
     ///          the GitHub Release page covers the relevant threat surface for a
     ///          notification-only updater.
     ///   - Release URLs in the manifest must also be on github.com.
+    ///   - v1.2.2 mirror fallback: the manifest (NOT the release page) may also be
+    ///     fetched from jsDelivr CDN hosts (cdn/fastly/gcore.jsdelivr.net), which mirror
+    ///     the update-dist branch of this repository. raw.githubusercontent.com is
+    ///     unreachable from many networks (e.g. mainland China without a proxy); the
+    ///     auto-fallback lets the update notification still work there. Release/notes
+    ///     URLs stay github.com-only; the updater remains notification-only.
     /// </summary>
     internal sealed class SafeUpdater
     {
@@ -37,6 +43,7 @@ namespace HealthAutoArrange.Plugin
         private readonly ManualLogSource _log;
         private readonly string _currentVersion;
         private readonly Func<string> _githubManifestUrl;
+        private readonly Func<string> _mirrorManifestUrl;  // v1.2.2 jsDelivr fallback
         private readonly Action<string> _onUpdateAvailable;
         private UpdateManifest _candidate;
         private bool _started;
@@ -50,11 +57,12 @@ namespace HealthAutoArrange.Plugin
         }
 
         public SafeUpdater(ManualLogSource log, string currentVersion,
-            Func<string> githubManifestUrl, Action<string> onUpdateAvailable)
+            Func<string> githubManifestUrl, Func<string> mirrorManifestUrl, Action<string> onUpdateAvailable)
         {
             _log = log ?? throw new ArgumentNullException(nameof(log));
             _currentVersion = currentVersion ?? "0.0.0";
             _githubManifestUrl = githubManifestUrl ?? throw new ArgumentNullException(nameof(githubManifestUrl));
+            _mirrorManifestUrl = mirrorManifestUrl;  // optional; null disables the fallback
             _onUpdateAvailable = onUpdateAvailable;
             _snapshot = new UpdateUiSnapshot(UpdateUiState.Idle, _currentVersion, string.Empty, string.Empty, string.Empty);
         }
@@ -83,54 +91,101 @@ namespace HealthAutoArrange.Plugin
         {
             _snapshot = new UpdateUiSnapshot(UpdateUiState.Checking, _currentVersion, string.Empty, string.Empty, string.Empty);
             _candidate = null;
-            var source = NormalizeUrl(_githubManifestUrl());
-            if (!IsGitHubHttpsUrl(source)) { Fail("The GitHub update manifest URL is invalid."); yield break; }
 
-            UnityWebRequest request = null;
-            try
+            // v1.2.2: try the primary GitHub URL first, then automatic jsDelivr mirror
+            // fallbacks. raw.githubusercontent.com is blocked on many networks; jsDelivr
+            // mirrors the update-dist branch of this repository and is usually reachable.
+            var candidates = BuildCandidateUrls();
+            if (candidates.Count == 0) { Fail("No usable update manifest URL is configured."); yield break; }
+
+            string lastError = null;
+            foreach (var source in candidates)
             {
+                if (!IsAllowedManifestUrl(source)) { lastError = "The update manifest URL is invalid: " + source; continue; }
+
+                UnityWebRequest request = null;
+                bool abandon = false;
                 try
                 {
-                    request = UnityWebRequest.Get(source);
-                    request.timeout = ManifestTimeoutSeconds;
-                    request.redirectLimit = 4;
-                    request.SendWebRequest();
-                }
-                catch (Exception ex) { Fail(ex.Message); yield break; }
-
-                while (!request.isDone)
-                {
-                    if (request.downloadedBytes > MaxManifestBytes)
+                    try
                     {
-                        request.Abort();
-                        Fail("Update manifest exceeded the 32 KiB safety limit.");
+                        request = UnityWebRequest.Get(source);
+                        request.timeout = ManifestTimeoutSeconds;
+                        request.redirectLimit = 4;
+                        request.SendWebRequest();
+                    }
+                    catch (Exception ex) { lastError = ex.Message; continue; }
+
+                    while (!request.isDone)
+                    {
+                        if (request.downloadedBytes > MaxManifestBytes)
+                        {
+                            request.Abort();
+                            lastError = "Update manifest exceeded the 32 KiB safety limit.";
+                            abandon = true;
+                            break;
+                        }
+                        yield return null;
+                    }
+                    if (abandon) continue;
+                    if (request.downloadedBytes > MaxManifestBytes) { lastError = "Update manifest exceeded the 32 KiB safety limit."; continue; }
+                    if (!RequestSucceeded(request))
+                    {
+                        lastError = string.IsNullOrEmpty(request.error)
+                            ? "HTTP " + request.responseCode.ToString(CultureInfo.InvariantCulture)
+                            : request.error;
+                        // Surface the fallback attempt on the F8 panel while checking.
+                        _snapshot = new UpdateUiSnapshot(UpdateUiState.Checking, _currentVersion, string.Empty,
+                            "Primary manifest unreachable (" + lastError + "); trying mirror...", string.Empty);
+                        _log.LogInfo("HealthAutoArrange update checker: " + source + " failed (" + lastError + "); trying next source.");
+                        continue;
+                    }
+
+                    UpdateManifest manifest;
+                    string parseError = string.Empty;
+                    if (request.downloadHandler == null || !TryParseManifest(request.downloadHandler.text, out manifest, out parseError))
+                    {
+                        // A manifest we could actually download but not parse is a real
+                        // error; do not mask it by falling through to mirrors.
+                        Fail(string.IsNullOrEmpty(parseError) ? "GitHub returned an empty update manifest." : parseError);
                         yield break;
                     }
-                    yield return null;
-                }
-                if (request.downloadedBytes > MaxManifestBytes) { Fail("Update manifest exceeded the 32 KiB safety limit."); yield break; }
-                if (!RequestSucceeded(request))
-                {
-                    Fail(string.IsNullOrEmpty(request.error) ? "HTTP " + request.responseCode.ToString(CultureInfo.InvariantCulture) : request.error);
+
+                    _candidate = manifest;
+                    if (CompareVersions(manifest.Version, _currentVersion) > 0)
+                    {
+                        _snapshot = new UpdateUiSnapshot(UpdateUiState.Available, _currentVersion, manifest.Version, string.Empty, string.Empty);
+                        _log.LogInfo("HealthAutoArrange update checker: GitHub release v" + manifest.Version + " is available.");
+                        try { _onUpdateAvailable?.Invoke(manifest.Version); }
+                        catch (Exception ex) { _log.LogWarning("HealthAutoArrange update reminder failed: " + ex.Message); }
+                    }
+                    else _snapshot = new UpdateUiSnapshot(UpdateUiState.UpToDate, _currentVersion, manifest.Version, string.Empty, string.Empty);
                     yield break;
                 }
-
-                UpdateManifest manifest;
-                string parseError = string.Empty;
-                if (request.downloadHandler == null || !TryParseManifest(request.downloadHandler.text, out manifest, out parseError))
-                { Fail(string.IsNullOrEmpty(parseError) ? "GitHub returned an empty update manifest." : parseError); yield break; }
-
-                _candidate = manifest;
-                if (CompareVersions(manifest.Version, _currentVersion) > 0)
-                {
-                    _snapshot = new UpdateUiSnapshot(UpdateUiState.Available, _currentVersion, manifest.Version, string.Empty, string.Empty);
-                    _log.LogInfo("HealthAutoArrange update checker: GitHub release v" + manifest.Version + " is available.");
-                    try { _onUpdateAvailable?.Invoke(manifest.Version); }
-                    catch (Exception ex) { _log.LogWarning("HealthAutoArrange update reminder failed: " + ex.Message); }
-                }
-                else _snapshot = new UpdateUiSnapshot(UpdateUiState.UpToDate, _currentVersion, manifest.Version, string.Empty, string.Empty);
+                finally { request?.Dispose(); }
             }
-            finally { request?.Dispose(); }
+
+            Fail(lastError ?? "All update manifest sources were unreachable.");
+        }
+
+        /// <summary>
+        /// v1.2.2: candidate manifest URLs in priority order: the configured GitHub URL,
+        /// the configured mirror, and an auto-derived fastly variant of a jsDelivr
+        /// mirror for redundancy.
+        /// </summary>
+        private List<string> BuildCandidateUrls()
+        {
+            var list = new List<string>();
+            var primary = NormalizeUrl(_githubManifestUrl != null ? _githubManifestUrl() : null);
+            if (!string.IsNullOrEmpty(primary)) list.Add(primary);
+            var mirror = NormalizeUrl(_mirrorManifestUrl != null ? _mirrorManifestUrl() : null);
+            if (!string.IsNullOrEmpty(mirror) && !list.Contains(mirror)) list.Add(mirror);
+            if (!string.IsNullOrEmpty(mirror))
+            {
+                var fastly = DeriveFastlyVariant(mirror);
+                if (!string.IsNullOrEmpty(fastly) && !list.Contains(fastly)) list.Add(fastly);
+            }
+            return list;
         }
 
         private void Fail(string detail)
@@ -199,19 +254,50 @@ namespace HealthAutoArrange.Plugin
             version = new Version(major, minor, patch); return true;
         }
 
+        /// <summary>net472-safe case-insensitive prefix swap: cdn.jsdelivr.net → fastly.jsdelivr.net.</summary>
+        private static string DeriveFastlyVariant(string url)
+        {
+            const string CdnPrefix = "https://cdn.jsdelivr.net/";
+            if (url != null && url.StartsWith(CdnPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return "https://fastly.jsdelivr.net/" + url.Substring(CdnPrefix.Length);
+            }
+            return null;
+        }
+
         private static bool IsGitHubHttpsUrl(string value)
         {
             Uri uri;
             if (!Uri.TryCreate(value, UriKind.Absolute, out uri) || !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) return false;
-            return string.Equals(uri.Host, "github.com", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(uri.Host, "raw.githubusercontent.com", StringComparison.OrdinalIgnoreCase);
+            return IsGitHubHost(uri.Host);
+        }
+
+        private static bool IsGitHubHost(string host)
+        {
+            return string.Equals(host, "github.com", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(host, "raw.githubusercontent.com", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// v1.2.2: allowed MANIFEST source hosts. The manifest itself may come from
+        /// GitHub or the jsDelivr CDN mirrors of this repository's update-dist branch
+        /// (cdn/fastly/gcore.jsdelivr.net). Release notes URLs remain github.com-only.
+        /// </summary>
+        private static bool IsAllowedManifestUrl(string value)
+        {
+            Uri uri;
+            if (!Uri.TryCreate(value, UriKind.Absolute, out uri) || !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) return false;
+            if (IsGitHubHost(uri.Host)) return true;
+            return string.Equals(uri.Host, "cdn.jsdelivr.net", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(uri.Host, "fastly.jsdelivr.net", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(uri.Host, "gcore.jsdelivr.net", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string NormalizeUrl(string value) => (value ?? string.Empty).Trim();
         private static bool RequestSucceeded(UnityWebRequest request)
         {
             return request != null && string.IsNullOrEmpty(request.error) && request.responseCode >= 200
-                && request.responseCode < 400 && IsGitHubHttpsUrl(request.url);
+                && request.responseCode < 400 && IsAllowedManifestUrl(request.url);
         }
     }
 }

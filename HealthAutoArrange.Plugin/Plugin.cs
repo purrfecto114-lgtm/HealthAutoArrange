@@ -19,7 +19,7 @@ namespace HealthAutoArrange.Plugin
     /// 单个可选补丁目标缺失时降级并记录；运行期可捕获的托管异常尽量隔离。
     /// 不宣称能够吞掉 Unity 原生层故障，也不把 ABI/依赖不匹配伪装成“安全可继续”。
     /// </summary>
-    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.2.1")]
+    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.2.2")]
     public class Plugin : BaseUnityPlugin,
         IFallbackSettingsActions,
         IFallbackSettingsStateActions,
@@ -48,6 +48,7 @@ namespace HealthAutoArrange.Plugin
         private ConfigEntry<bool> _autoCheckUpdates;
         private ConfigEntry<float> _updateCheckDelaySeconds;
         private ConfigEntry<string> _officialManifestUrl;
+        private ConfigEntry<string> _mirrorManifestUrl;  // v1.2.2: fallback for networks that cannot reach raw.githubusercontent.com
         private SafeUpdater _updater;
         private string _pendingUpdateVersion;
         private string _statusMessage = string.Empty;
@@ -99,7 +100,10 @@ namespace HealthAutoArrange.Plugin
                 "Seconds to wait after game launch before the one-time GitHub update notification check.");
             _officialManifestUrl = Config.Bind("Updates", "OfficialManifestUrl",
                 "https://raw.githubusercontent.com/purrfecto114-lgtm/HealthAutoArrange/update-dist/latest.txt",
-                "GitHub-hosted update manifest. GitHub HTTPS URLs only (github.com or raw.githubusercontent.com).");
+                "Primary update manifest. Hosts allowed: github.com, raw.githubusercontent.com, cdn.jsdelivr.net, fastly.jsdelivr.net, gcore.jsdelivr.net.");
+            _mirrorManifestUrl = Config.Bind("Updates", "MirrorManifestUrl",
+                "https://cdn.jsdelivr.net/gh/purrfecto114-lgtm/HealthAutoArrange@update-dist/latest.txt",
+                "v1.2.2: fallback manifest mirror (jsDelivr CDN) used automatically when the primary URL is unreachable, e.g. on networks where raw.githubusercontent.com is blocked.");
             var chineseUi = ResolveChineseUiLanguage();
 
             // 2. 读取 BepInEx 配置（默认模板 + 兼容解析）
@@ -132,6 +136,7 @@ namespace HealthAutoArrange.Plugin
                 Logger,
                 Info.Metadata.Version.ToString(),
                 () => _officialManifestUrl?.Value,
+                () => _mirrorManifestUrl?.Value,  // v1.2.2: automatic jsDelivr fallback
                 ShowUpdateAvailableFeedback);
 
             // 6. F8 设置窗口使用独立编辑副本，未保存修改不会污染宿主的已应用模型。
@@ -142,25 +147,43 @@ namespace HealthAutoArrange.Plugin
             _harmony = new Harmony("com.healthautoarrange.plugin");
             try
             {
-                // Patch only the reverse-engineered parameterless signatures. A name-only lookup
-                // can become ambiguous or silently select a new overload after a game update.
-                var refreshMethod = AccessTools.Method(typeof(MoodleManager), "UpdateMoodles", Type.EmptyTypes)
-                    ?? AccessTools.Method(typeof(MoodleManager), "AddAllMoodles", Type.EmptyTypes);
-                if (refreshMethod == null)
+                // v1.2.2: patch EVERY rebuild boundary instead of one preferred hook.
+                // Patch only the reverse-engineered parameterless signatures (name + empty
+                // formal types; a name-only lookup can become ambiguous or silently select a
+                // new overload after a game update).
+                //   - UpdateMoodles: the 0.5s timer path (v1.1.x hook).
+                //   - AddAllMoodles: the LOWEST boundary every rebuild funnels through
+                //     regardless of caller. v1.2.1 left any non-UpdateMoodles caller
+                //     unsupervised, so the game's source order rendered until the 4 Hz net
+                //     corrected it (user-visible "two orders taking turns").
+                //   - ClearMoodles: start-of-cycle reset for the per-cycle accumulation.
+                var boundaryNames = new[]
                 {
-                    Logger.LogWarning("Neither MoodleManager.UpdateMoodles nor AddAllMoodles was found; sorting refresh hook disabled.");
+                    new { Patch = nameof(GamePatches.MoodleRefreshPostfix), Target = "UpdateMoodles", Label = "UpdateMoodles (0.5s timer path)" },
+                    new { Patch = nameof(GamePatches.AddAllMoodlesPostfix), Target = "AddAllMoodles", Label = "AddAllMoodles (lowest rebuild boundary, v1.2.2)" },
+                    new { Patch = nameof(GamePatches.ClearMoodlesPostfix), Target = "ClearMoodles", Label = "ClearMoodles (cycle reset, v1.2.2)" }
+                };
+                int boundariesPatched = 0;
+                foreach (var boundary in boundaryNames)
+                {
+                    var method = AccessTools.Method(typeof(MoodleManager), boundary.Target, Type.EmptyTypes);
+                    if (method == null)
+                    {
+                        Logger.LogWarning($"MoodleManager.{boundary.Target} not found; boundary hook skipped ({boundary.Label}).");
+                        continue;
+                    }
+                    _harmony.Patch(method, postfix: new HarmonyMethod(typeof(GamePatches), boundary.Patch));
+                    boundariesPatched++;
+                    Logger.LogInfo($"Patched Moodle rebuild boundary: {boundary.Label}.");
                 }
-                else
+                if (boundariesPatched == 0)
                 {
-                    _harmony.Patch(
-                        refreshMethod,
-                        postfix: new HarmonyMethod(typeof(GamePatches), nameof(GamePatches.MoodleRefreshPostfix)));
-                    Logger.LogInfo($"Patched Moodle refresh boundary: {refreshMethod.Name}.");
+                    Logger.LogWarning("No Moodle rebuild boundary could be patched; sorting refresh hooks disabled.");
                 }
             }
             catch (Exception ex)
             {
-                Logger.LogWarning($"Failed to patch Moodle refresh boundary: {ex.Message}");
+                Logger.LogWarning($"Failed to patch Moodle rebuild boundaries: {ex.Message}");
             }
 
             // AddMoodle 前缀只捕获元数据；后缀（v1.2.0 新增）记录新创建 moodle 的
@@ -518,6 +541,8 @@ namespace HealthAutoArrange.Plugin
                 Logger.LogInfo($"  MoodleRefreshPostfix invoked: {GamePatches.MoodleRefreshPostfixInvoked} (count: {GamePatches.MoodleRefreshInvokeCount})");
                 Logger.LogInfo($"  AddMoodlePrefix      invoked: {GamePatches.AddMoodlePrefixInvoked} (count: {GamePatches.AddMoodleInvokeCount})");
                 Logger.LogInfo($"  AddMoodlePostfix     invoked: {GamePatches.AddMoodlePostfixInvoked} (count: {GamePatches.AddMoodlePostfixInvokeCount})  [v1.2.0]");
+                Logger.LogInfo($"  AddAllMoodlesPostfix invoked: {GamePatches.AddAllMoodlesPostfixInvoked} (count: {GamePatches.AddAllMoodlesInvokeCount})  [v1.2.2]");
+                Logger.LogInfo($"  ClearMoodlesPostfix  invoked: {GamePatches.ClearMoodlesPostfixInvoked} (count: {GamePatches.ClearMoodlesInvokeCount})  [v1.2.2]");
                 Logger.LogInfo($"  IsPointerOverUIElementPostfix invoked: {GamePatches.PointerOverUiPostfixInvoked}");
                 Logger.LogInfo($"  Settings window open now: {SettingsWindowOpen}");
                 Logger.LogInfo($"  Auto-arrange Enabled: {(_uiModel?.Enabled ?? false)}");

@@ -27,6 +27,10 @@ namespace HealthAutoArrange.Plugin
         internal static long MoodleRefreshInvokeCount;
         internal static long AddMoodleInvokeCount;
         internal static long AddMoodlePostfixInvokeCount;  // v1.2.0
+        internal static bool AddAllMoodlesPostfixInvoked;  // v1.2.2
+        internal static bool ClearMoodlesPostfixInvoked;  // v1.2.2
+        internal static long AddAllMoodlesInvokeCount;  // v1.2.2
+        internal static long ClearMoodlesInvokeCount;  // v1.2.2
 
         /// <summary>
         /// UIUtil.IsPointerOverUIElement() 后置补丁：保留游戏和其他 Mod 的原始判断，
@@ -106,6 +110,50 @@ namespace HealthAutoArrange.Plugin
             catch (Exception ex)
             {
                 Plugin.PluginLog?.LogWarning($"HealthAutoArrange: AddMoodle postfix error: {ex}");
+            }
+        }
+
+        /// <summary>
+        /// v1.2.2: AddAllMoodles 后置补丁。AddAllMoodles 是所有重建路径的最低边界——
+        /// 无论调用者是 UpdateMoodles 的 0.5s 定时器还是其他任何（未知的）路径，
+        /// 本轮重建的全部新节点在 postfix 时刻都已创建完毕。postfix 直接调用
+        /// Adapter.OnMoodlesUpdated 在同一帧内完成最终排序（渲染发生在帧末，用户
+        /// 永远看不到游戏的原始创建顺序）。
+        /// v1.2.1 只挂了 UpdateMoodles 一条路径：任何绕过它的重建（直呼 AddAllMoodles
+        /// 或逐个 AddMoodle）都要等 4Hz 周期兜底才被纠正，期间用户看到游戏顺序与
+        /// mod 顺序“互相替代”。
+        /// </summary>
+        public static void AddAllMoodlesPostfix(MoodleManager __instance)
+        {
+            AddAllMoodlesPostfixInvoked = true;
+            AddAllMoodlesInvokeCount++;
+            try
+            {
+                Plugin.Adapter?.OnMoodlesUpdated(__instance);
+            }
+            catch (Exception ex)
+            {
+                Plugin.PluginLog?.LogWarning($"HealthAutoArrange: AddAllMoodles postfix error: {ex}");
+            }
+        }
+
+        /// <summary>
+        /// v1.2.2: ClearMoodles 后置补丁。ClearMoodles 在每轮重建最前执行（销毁旧
+        /// 节点，Object.Destroy 延迟到帧末才真正移除）。postfix 时通知 Adapter 重置
+        /// 本轮累积状态（创建序列、fresh-set、watchdog 计划），让随后的 AddMoodle
+        /// 后缀从零开始累积/定位。
+        /// </summary>
+        public static void ClearMoodlesPostfix(MoodleManager __instance)
+        {
+            ClearMoodlesPostfixInvoked = true;
+            ClearMoodlesInvokeCount++;
+            try
+            {
+                Plugin.Adapter?.OnMoodlesCleared(__instance);
+            }
+            catch (Exception ex)
+            {
+                Plugin.PluginLog?.LogWarning($"HealthAutoArrange: ClearMoodles postfix error: {ex}");
             }
         }
     }
