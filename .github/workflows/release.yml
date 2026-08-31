@@ -71,9 +71,10 @@ jobs:
         shell: pwsh
         run: |
           $staging = Join-Path $env:RUNNER_TEMP 'staging'
-          New-Item -ItemType Directory -Force -Path $staging | Out-Null
-          Copy-Item 'HealthAutoArrange.Plugin/bin/Release/net472/HealthAutoArrange.Plugin.dll' $staging
-          Copy-Item 'HealthAutoArrange.Core/bin/Release/netstandard2.0/HealthAutoArrange.Core.dll' $staging
+          $pluginDir = Join-Path $staging 'BepInEx/plugins/HealthAutoArrange'
+          New-Item -ItemType Directory -Force -Path $pluginDir | Out-Null
+          Copy-Item 'HealthAutoArrange.Plugin/bin/Release/net472/HealthAutoArrange.Plugin.dll' $pluginDir
+          Copy-Item 'HealthAutoArrange.Core/bin/Release/netstandard2.0/HealthAutoArrange.Core.dll' $pluginDir
           if ($env:GITHUB_REF -like 'refs/tags/*') {
             $version = $env:GITHUB_REF_NAME -replace '^v', ''
           } else {

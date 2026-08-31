@@ -96,5 +96,7 @@ AddMoodle 空跑、外部位置攻击（模拟未挂钩的游戏重定位路径�
 ## 安装
 
 1. 安装 BepInEx 5.4.23.5（游戏为 Unity Mono，x64）。
-2. 解压 `HealthAutoArrange-1.2.2-v701.zip` 到游戏根目录（DLL 落入 `BepInEx/plugins/HealthAutoArrange/`）。
+2. 将 `HealthAutoArrange-1.2.2-v701.zip` 解压到游戏根目录——zip 内已带
+   `BepInEx/plugins/HealthAutoArrange/` 路径，两个 DLL 会自动落位
+   （也可以按 README 的手动方式复制两个 DLL）。
 3. F8 设置窗口 / F9 诊断 / Ctrl+R 立即重排 / Ctrl+E 快速开关。
