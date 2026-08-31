@@ -1,4 +1,4 @@
 schema=2
-version=1.2.1
-notesUrl=https://github.com/purrfecto114-lgtm/HealthAutoArrange/releases/tag/v1.2.1
-publishedUtc=2026-08-29T16:28:51Z
+version=1.2.2
+notesUrl=https://github.com/purrfecto114-lgtm/HealthAutoArrange/releases/tag/v1.2.2
+publishedUtc=2026-08-31T11:36:18Z
