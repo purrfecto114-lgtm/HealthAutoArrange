@@ -100,3 +100,23 @@ AddMoodle 空跑、外部位置攻击（模拟未挂钩的游戏重定位路径�
    `BepInEx/plugins/HealthAutoArrange/` 路径，两个 DLL 会自动落位
    （也可以按 README 的手动方式复制两个 DLL）。
 3. F8 设置窗口 / F9 诊断 / Ctrl+R 立即重排 / Ctrl+E 快速开关。
+
+## 附：真实 7.0.1 运行时验证（2026-09-11，用户提供 Managed.zip 后补录）
+
+用户提供了游戏真实运行时 `Managed.zip`（Assembly-CSharp.dll 879,104 字节，含真实方法体，
+非 NuGet publicised 引用程序集的 throw-null 存根）。字节级元数据比对确认其与 7.0.1
+publicised 引用集的类型/成员清单完全一致（唯一差异为 publicizer 注入的可见性属性）。
+基于该真实程序集完成全量审计：
+
+| 审计项 | 结果 |
+| --- | --- |
+| 4 个补丁目标方法（UpdateMoodles / AddAllMoodles / ClearMoodles / AddMoodle 六参） | 全部存在且签名一致 |
+| 重建路径数量 | 全程序集仅 0.5s 定时器一条（无外部调用者） |
+| 层级变更回调（OnTransformChildrenChanged 等） | 零处——SetSiblingIndex 不可能触发游戏重建循环 |
+| moodles 容器 LayoutGroup | 代码从未添加（恒走 AnchoredPosition 模式） |
+| Moodle.Update | 只写 y（critical 正弦摆动 ±4px / pop-in 回落），x 恒保留——mod 只写 x，零冲突面 |
+| 死亡路径 | AddAllMoodles 首行 `if (!body.alive) return;`，postfix 仍触发——v1.2.2 门控天然兼容 |
+| 与 v6.1 差异 | 仅 venom 不再 chippedOnly、autopump moodle 移除、alwaysShowHidden 新增——均不影响排序架构 |
+
+模拟器同步升级为真实 7.0.1 逐行保真（含 critical y-摆动、死亡早退、双脚本执行顺序），
+20/20 场景通过；xUnit 213/213。**插件二进制无改动**——本次为纯验证升级，v1.2.2 发布物保持不变。

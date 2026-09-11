@@ -1,27 +1,47 @@
-// Faithful re-implementation of the decompiled Casualties: Unknown MoodleManager rebuild
-// cycle (v6.1 ground truth; the 7.0.1 runtime bodies are not publicly available, so the
-// game side of the simulator uses the last observed behavior):
+// Faithful re-implementation of the decompiled Casualties: Unknown Demo 7.0.1
+// MoodleManager rebuild cycle.
+//
+// GROUND TRUTH PROVENANCE (v1.2.3 sim upgrade): the user provided the real game
+// runtime Managed.zip (Assembly-CSharp.dll, 879,104 bytes, real method bodies -
+// not the publicised NuGet reference assembly whose bodies are all `throw null`).
+// It was decompiled with ilspycmd 9.1 and BYTE-VERIFIED against the publicised
+// 7.0.1 ref (identical type/member sets; only visibility differs). This fake now
+// mirrors the REAL 7.0.1 bodies line-for-line where position is concerned:
 //   Update()            : updateTime -= unscaledDeltaTime; when <= 0 -> UpdateMoodles()
 //   UpdateMoodles()     : sideMoodles=false; updateTime=0.5; UpdatePrevMoodles();
 //                         ClearMoodles(); AddAllMoodles();
-//   ClearMoodles()      : Object.Destroy(each child); moodleCount=0; mainCount=0
-//   AddAllMoodles()     : hardcoded if/else chain -> AddMoodle(...) per current body state
-//                         (+ side moodles, then a bonus "+N" prefab instantiation)
+//   ClearMoodles()      : Object.Destroy(each child) [DEFERRED to end of frame];
+//                         moodleCount=0; mainCount=0
+//   AddAllMoodles()     : if (!body.alive) return;  <- REAL 7.0.1 death early-return
+//                         if/else chain -> AddMoodle(...) per body state;
+//                         sideMoodles=true; side AddMoodle(...)s;
+//                         bonus "+N" Instantiate (no Moodle component) at
+//                         (mainCount * 70 - 10, 0) when moodleCount - mainCount > 0
 //   AddMoodle(...)      : if (chippedOnly && WorldGeneration.unchipped) return (no-op!);
 //                         else new GameObject, SetParent(moodles) [appends LAST sibling],
-//                         anchoredPosition = (moodleCount * 70, ...), isSide = sideMoodles,
-//                         type = icon + intensity, mainCount/moodleCount++
-//   bonus "+N"          : child of moodles WITHOUT a Moodle component at
-//                         anchoredPosition = (mainCount * 70 - 10, 0)
+//                         anchoredPosition = (moodleCount * 70,
+//                                 critical ? Sin(unscaledTime * 6) * 4 : 0),  <- REAL wobble base
+//                         type = icon + intensity, isSide = sideMoodles,
+//                         doWarningFlash = critical && showSideMoodles,         <- REAL flash gate
+//                         if !prevMoodles.Contains(type): y += 75, scale = 2.5 (pop-in),
+//                         mainCount/moodleCount++
+//   Moodle.Update()     : anchoredPosition = (x PRESERVED,
+//                                 Lerp(y, doWarningFlash ? Sin(t*6)*4 : 0, dt*12));  <- REAL wobble chase
+//                         localScale = Lerp(scale, one, dt*12)
 //
-// The fake game also re-implements Moodle.Update() faithfully: every frame it lerps y
-// toward 0 and LEAVES x untouched (so the mod's x writes persist).
+// showSideMoodles semantics (real property): true unless (manager.sideMoodles &&
+// !alwaysShowHidden && mouseLow) - in which case woundView.activeSelf. During MAIN
+// moodle creation the manager's sideMoodles field is always false (UpdateMoodles
+// resets it before AddAllMoodles), so MAIN criticals ALWAYS get doWarningFlash
+// (they wobble forever). Side criticals flash only while visible. The fake models
+// the mouse/wound component with a single static toggle.
 //
 // Harmony simulation: the fake game calls the exact adapter callbacks that the real
 // GamePatches routes, in the same order:
 //   per AddMoodle: OnMoodleAdded (prefix) -> [game body] -> OnMoodleCreated (postfix)
 //   ClearMoodles : OnMoodlesCleared (postfix)
-//   AddAllMoodles: OnMoodlesUpdated (postfix)   [v1.2.2 boundary]
+//   AddAllMoodles: OnMoodlesUpdated (postfix)   [v1.2.2 lowest boundary; fires after
+//                  the death early-return too, exactly like a real postfix]
 //   UpdateMoodles: OnMoodlesUpdated (postfix)   [same frame; adapter dedupes]
 using System;
 using System.Collections.Generic;
@@ -29,11 +49,13 @@ using HealthAutoArrange.Core;
 using HealthAutoArrange.Plugin;
 using UnityEngine;
 
-    /// <summary>The game's Moodle component (decompiled fields actually used by the mod).</summary>
+    /// <summary>The game's Moodle component (decompiled fields actually used by the mod + the
+    /// wobble flag that drives Moodle.Update's y target).</summary>
     public sealed class Moodle : MonoBehaviour
     {
         public string type;
         public bool isSide;
+        public bool doWarningFlash;
     }
 
     /// <summary>Stands in for the game's WorldGeneration.unchipped static.</summary>
@@ -50,6 +72,15 @@ using UnityEngine;
     {
         public Transform moodles;
         public bool sideMoodles;
+        /// <summary>Models body.alive: real AddAllMoodles starts with
+        /// `if (!body.alive) return;` (moodles vanish on death; postfix still fires).</summary>
+        public bool alive = true;
+        /// <summary>Models the mouse/wound half of the real showSideMoodles property.
+        /// Side criticals flash (and wobble) only while this is true; main criticals
+        /// always flash because the manager's sideMoodles field is false during the
+        /// main-row creation block.</summary>
+        public static bool SideMoodlesVisible = true;
+
         internal float updateTime = 0.5f;
         internal int moodleCount;
         internal int mainCount;
@@ -117,21 +148,26 @@ using UnityEngine;
 
         public void AddAllMoodles()
         {
-            foreach (var state in CurrentStates)
+            // REAL 7.0.1 death early-return (decomp line 160: if (!body.alive) return;).
+            if (alive)
             {
-                AddMoodle(state.intensity, state.icon, state.icon, state.icon + "dsc",
-                    state.critical, state.chippedOnly);
-            }
-            if (moodleCount - mainCount > 0)
-            {
-                // Bonus "+N" prefab: a child of moodles WITHOUT a Moodle component.
-                var bonus = new GameObject("BonusMoodle");
-                bonus.transform.SetParent(moodles);
-                bonus.transform.GetComponent<RectTransform>().anchoredPosition
-                    = new Vector2(mainCount * 70 - 10, 0f);
+                foreach (var state in CurrentStates)
+                {
+                    AddMoodle(state.intensity, state.icon, state.icon, state.icon + "dsc",
+                        state.critical, state.chippedOnly);
+                }
+                if (moodleCount - mainCount > 0)
+                {
+                    // Bonus "+N" prefab: a child of moodles WITHOUT a Moodle component.
+                    var bonus = new GameObject("BonusMoodle");
+                    bonus.transform.SetParent(moodles);
+                    bonus.transform.GetComponent<RectTransform>().anchoredPosition
+                        = new Vector2(mainCount * 70 - 10, 0f);
+                }
             }
 
-            // Simulated AddAllMoodlesPostfix (v1.2.2 lowest rebuild boundary).
+            // Simulated AddAllMoodlesPostfix (v1.2.2 lowest rebuild boundary). A real
+            // Harmony postfix runs after an early return as well.
             _adapter?.OnMoodlesUpdated(this);
         }
 
@@ -149,14 +185,24 @@ using UnityEngine;
                 var rect = gameObject.transform.GetComponent<RectTransform>();
                 rect.anchorMin = new Vector2(0f, 0.5f);
                 rect.anchorMax = new Vector2(0f, 0.5f);
-                rect.anchoredPosition = new Vector2(moodleCount * 70, 0f);
+                // REAL 7.0.1 creation y: criticals are born ON the wobble sine.
+                rect.anchoredPosition = new Vector2(moodleCount * 70,
+                    (!critical) ? 0f : (Mathf.Sin(Time.unscaledTime * 6f) * 4f));
                 var moodle = gameObject.AddComponent<Moodle>();
                 moodle.type = icon + intensity.ToString();
                 moodle.isSide = sideMoodles;
+                // REAL flash gate: critical && showSideMoodles. During the main block the
+                // manager's sideMoodles field is false, so the property is true (main
+                // criticals always flash); during the side block it defers to the toggle.
+                bool showSideMoodlesNow = !sideMoodles || SideMoodlesVisible;
+                if (critical && showSideMoodlesNow)
+                {
+                    moodle.doWarningFlash = true;
+                }
                 if (!prevMoodles.Contains(moodle.type))
                 {
                     // Pop-in animation start: +75 on y and 2.5 scale; Moodle.Update lerps
-                    // these back toward (row y, scale 1) every frame.
+                    // these back toward (wobble y, scale 1) every frame.
                     rect.anchoredPosition += Vector2.up * 75f;
                     gameObject.transform.localScale = Vector3.one * 2.5f;
                 }
@@ -173,8 +219,8 @@ using UnityEngine;
     }
 
     /// <summary>
-    /// Faithful Moodle.Update(): lerps y toward 0 (or the critical sine) every frame and
-    /// NEVER touches x. Also lerps scale back toward 1. Returns nothing.
+    /// Faithful Moodle.Update() (real 7.0.1): lerps y toward 0 - or toward the critical
+    /// sine wobble - every frame and NEVER touches x. Also lerps scale back toward 1.
     /// </summary>
     public static class MoodleBehaviour
     {
@@ -185,11 +231,12 @@ using UnityEngine;
             var rect = moodleObject.transform.GetComponent<RectTransform>();
             if (rect == null) return;
             // x is deliberately preserved - this is the decompiled behavior the mod relies on.
+            // y chases the wobble target when doWarningFlash, else the resting row y (0).
+            float targetY = (!m.doWarningFlash) ? 0f : (Mathf.Sin(Time.unscaledTime * 6f) * 4f);
             rect.anchoredPosition = new Vector2(
                 rect.anchoredPosition.x,
-                Mathf.Lerp(rect.anchoredPosition.y, 0f, Time.unscaledDeltaTime * 12f));
+                Mathf.Lerp(rect.anchoredPosition.y, targetY, Time.unscaledDeltaTime * 12f));
             moodleObject.transform.localScale = Vector3.Lerp(
                 moodleObject.transform.localScale, Vector3.one, Time.unscaledDeltaTime * 12f);
         }
     }
-
