@@ -127,8 +127,32 @@ namespace HealthAutoArrange.Plugin
         private Transform _watchdogContainer;
         private int _watchdogChildCount = -1;
         private long _creationTimePositionCount;  // diagnostics: creation-time incremental writes
-        private long _watchdogCorrectionCount;    // diagnostics: watchdog-triggered full resorts
+        private long _watchdogCorrectionCount;    // diagnostics: watchdog-triggered full resorts (UNEXPECTED drift)
+        private long _watchdogFinalizeCount;      // v1.2.3 diagnostics: expected post-rebuild finalize passes (silent)
         private long _moodlesClearedCount;        // diagnostics: ClearMoodles postfix invocations
+        private long _ghostsHiddenCount;          // v1.2.3 diagnostics: destroy-pending icons hidden at clear time
+        private long _preFadeCount;               // v1.2.3 diagnostics: creation-frame Start-color pre-applies
+        private bool _watchdogPlanIncomplete;     // v1.2.3: plan built during a rebuild frame (childCount unknown)
+
+        // v1.2.3 render-phase flash fixes (user report: "v1.2.2 没作用，还是会闪现").
+        // The v1.2.2 fixes made the mod's x-slot order authoritative within the rebuild
+        // frame, but TWO render-phase artifacts of the game's 0.5s full-rebuild cycle
+        // remained visible (they are game behaviors, yet the mod can neutralize both):
+        //   (a) ClearMoodles uses deferred Object.Destroy: the OLD icons stay in the
+        //       hierarchy (and render) for the whole rebuild frame, so the user sees the
+        //       old arrangement AND the new arrangement simultaneously for one frame -
+        //       shifted/duplicated icons and ghosts of expired states. Fix: hide every
+        //       destroy-pending child immediately in the ClearMoodles postfix; the game
+        //       never touches them afterwards (decompile: no other caller, no OnDisable
+        //       callbacks on Image/UITooltip/Moodle, no hierarchy-change callbacks).
+        //   (b) AddMoodle creates the icon's Image components with Unity's default color
+        //       (white, alpha 1). Moodle.Start() - which sets the intended fade-in alpha
+        //       (unTransparentTime = 0.5 for newly-appearing states) - only runs on the
+        //       NEXT frame, so every newly-appearing state renders one fully-opaque frame
+        //       and then blinks to transparent before fading in. Fix: replicate Start's
+        //       exact color formula in the AddMoodle postfix so the creation frame renders
+        //       the correct fade-in state.
+        // Both fixes run in the same frame as the rebuild; rendering happens at frame end.
         // Prefix stash used by OnMoodleCreated to detect AddMoodle no-op calls
         // (chippedOnly && WorldGeneration.unchipped creates nothing; the "last child"
         // is then a leftover, possibly a destroy-pending ghost from the previous cycle).
@@ -340,15 +364,66 @@ namespace HealthAutoArrange.Plugin
                 // skip this and rely on the per-frame watchdog, because a partial cycle
                 // list must never be used to write slots (it could overlap pre-existing
                 // moodles that are not part of the cycle).
+                var createdMoodle = newChild.GetComponent<Moodle>();
+
+                // v1.2.3 render-phase fix (b): replicate Moodle.Start()'s color
+                // initialization NOW (the creation frame) instead of one frame later.
+                // AddMoodle builds the icon with Unity's default Image color (white,
+                // alpha 1); Start only runs next frame, so a newly-appearing state (its
+                // fade-in alpha is 0 at creation) rendered one fully-opaque frame first.
+                if (_runtime.Enabled) PrefadeNewMoodle(newChild, createdMoodle);
+
                 if (_runtime.Enabled && _lastClearFrame == Time.frameCount && _lastClearManagerKey == key)
                 {
-                    var newMoodle = newChild.GetComponent<Moodle>();
-                    TryPositionCycleMembers(key, newChild, newMoodle);
+                    TryPositionCycleMembers(key, newChild, createdMoodle);
                 }
             }
             catch (Exception ex)
             {
                 LogThrottled($"OnMoodleCreated failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// v1.2.3 render-phase fix (b): pre-apply the colors Moodle.Start() will set next
+        /// frame, using the game's own formula (decompiled 7.0.1):
+        ///   img  .color = (1, 1, 1, ((PlayerCamera.main.blackAmount &lt; PlayerCamera.GetUnconsciousBlack()) ? 1 : 0) - unTransparentTime * 2)
+        ///   img2 .color = (1, 1, 1, 1 - unTransparentTime * 2)
+        /// where img is the root background Image and img2 the "MoodleInside" foreground.
+        /// PlayerCamera.blackAmount and GetUnconsciousBlack() are public in the game
+        /// assembly; on any access failure we fall back to the conscious-case values.
+        /// </summary>
+        private void PrefadeNewMoodle(Transform newChild, Moodle moodle)
+        {
+            try
+            {
+                if (newChild == null) return;
+                var img = newChild.GetComponent<Image>();
+                Transform inside = newChild.childCount > 0 ? newChild.GetChild(0) : null;
+                var img2 = inside != null ? inside.GetComponent<Image>() : null;
+                if (img == null || img2 == null) return;
+
+                float unTransparentTime = moodle != null ? moodle.unTransparentTime : 0f;
+                float backgroundAlpha;
+                try
+                {
+                    var camera = PlayerCamera.main;
+                    backgroundAlpha = (camera != null && camera.blackAmount < PlayerCamera.GetUnconsciousBlack())
+                        ? 1f - unTransparentTime * 2f
+                        : 0f - unTransparentTime * 2f;
+                }
+                catch
+                {
+                    // PlayerCamera unavailable (scene transition): conscious-case values.
+                    backgroundAlpha = 1f - unTransparentTime * 2f;
+                }
+                img.color = new Color(1f, 1f, 1f, backgroundAlpha);
+                img2.color = new Color(1f, 1f, 1f, 1f - unTransparentTime * 2f);
+                _preFadeCount++;
+            }
+            catch (Exception ex)
+            {
+                LogThrottled($"Pre-fade failed: {ex.Message}");
             }
         }
 
@@ -384,10 +459,57 @@ namespace HealthAutoArrange.Plugin
                 _cycleManagerKey = 0;
                 ClearFreshInstanceSet();
                 InvalidateWatchdog();
+
+                // v1.2.3: kill the rebuild-frame double-render (see HidePendingGhosts).
+                // Gated on the master toggle: with the mod disabled the user gets pure
+                // vanilla rendering, exactly as the GUI promises.
+                if (_runtime.Enabled) HidePendingGhosts(manager);
             }
             catch (Exception ex)
             {
                 LogThrottled($"OnMoodlesCleared failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// v1.2.3 render-phase fix (a): hide every destroy-pending child of the moodles
+        /// container right after ClearMoodles returns. Object.Destroy is deferred to the
+        /// end of the frame, so without this the OLD icons render one more frame and the
+        /// rebuild frame shows BOTH arrangements overlapping ("闪现"). Deactivating them
+        /// is safe: the game itself destroyed them already, never touches them again, and
+        /// none of their components (Image / UITooltip / Moodle) has OnDisable logic.
+        /// The mod's own Scan skips inactive children anyway; Destroy still completes.
+        /// </summary>
+        private void HidePendingGhosts(MoodleManager manager)
+        {
+            try
+            {
+                Transform moodles;
+                try { moodles = manager != null ? manager.moodles : null; }
+                catch { return; }
+                if (moodles == null) return;
+                int hidden = 0;
+                for (int i = 0; i < moodles.childCount; i++)
+                {
+                    var child = moodles.GetChild(i);
+                    if (child == null) continue;
+                    if (!child.gameObject.activeSelf) continue;
+                    try
+                    {
+                        child.gameObject.SetActive(false);
+                        hidden++;
+                    }
+                    catch
+                    {
+                        // A child that cannot be deactivated is destroyed at frame end
+                        // anyway; skipping it changes nothing semantically.
+                    }
+                }
+                if (hidden > 0) _ghostsHiddenCount += hidden;
+            }
+            catch (Exception ex)
+            {
+                LogThrottled($"Ghost-hide failed: {ex.Message}");
             }
         }
 
@@ -490,6 +612,20 @@ namespace HealthAutoArrange.Plugin
             }
             if (container.childCount != _watchdogChildCount)
             {
+                if (_watchdogPlanIncomplete)
+                {
+                    // v1.2.3: expected, healthy path. The plan was built during a rebuild
+                    // frame while destroy-pending ghosts were still counted, so the child
+                    // count is intentionally unknown (-1). This pass finalizes the plan on
+                    // the first clean frame. Not a warning: the old log spammed
+                    // "child count drift" ~1x per 0.5s rebuild and mislead users (and us)
+                    // into hunting a defect that is by-design.
+                    _watchdogFinalizeCount++;
+                    _lastSignature = string.Empty;
+                    _log?.Invoke(LogLevel.Debug, "Watchdog finalize pass (expected after rebuild).");
+                    ProcessRefresh();  // re-entrancy guarded; rebuild frame is over
+                    return;
+                }
                 RequestFullRefresh("child count drift");
                 return;
             }
@@ -532,6 +668,7 @@ namespace HealthAutoArrange.Plugin
             _watchdogExpectedX.Clear();
             _watchdogContainer = null;
             _watchdogChildCount = -1;
+            _watchdogPlanIncomplete = !complete;
             try
             {
                 if (_manager == null) return;
@@ -558,6 +695,7 @@ namespace HealthAutoArrange.Plugin
             _watchdogExpectedX.Clear();
             _watchdogContainer = null;
             _watchdogChildCount = -1;
+            _watchdogPlanIncomplete = false;
         }
 
         /// <summary>
@@ -907,7 +1045,13 @@ namespace HealthAutoArrange.Plugin
         }
 
         /// <summary>
-        /// F9 诊断入口：dump 当前 Moodle 的 id/基础名/显示名/行/强度/critical/创建顺序/位置。
+        /// F9 诊断入口（v1.2.3 全面刷新，与当前管线一致）：
+        /// - 单一 stats 行（旧版 v1.2.1/v1.2.2 分版本统计已过时且互相漂移）；
+        /// - frame/sort 行：看门狗计划状态、组内排序模式、未知状态策略；
+        /// - 每条 moodle：id/基础名/显示名/行/分组/强度/critical/捕获序号/槽位/sibling/锚点位置；
+        ///   强度优先取捕获，回退 runtime id 末尾数字（游戏 type = 图标名+强度，恒可解析）；
+        ///   捕获解析不设 sequence 下限——F9 是手动读取当前屏幕状态，需要最新元数据，
+        ///   旧版在刷新边界之后一律打印 intensity=unknown/name=''/seq=-1 即此缺陷。
         /// </summary>
         public void DumpDiagnostics()
         {
@@ -925,8 +1069,9 @@ namespace HealthAutoArrange.Plugin
                 }
 
                 _log?.Invoke(LogLevel.Info, $"Pending=False, Manager={(_manager != null ? _manager.name : "null")}");
-                _log?.Invoke(LogLevel.Info, $"v1.2.1 stats: AddMoodlePostfixCount={_addMoodlePostfixCount}, PeriodicResortCount={_periodicResortCount}, SiblingFallbackCount={_siblingSortFallbackCount}, AnchoredWriteCount={_anchoredSortWriteCount}, FreshSetSize={(_freshManagerKey != 0 && _freshInstanceIdsByManager.TryGetValue(_freshManagerKey, out var fs) ? fs.Count : 0)}");
-                _log?.Invoke(LogLevel.Info, $"v1.2.2 stats: MoodlesClearedCount={_moodlesClearedCount}, CreationTimePositionCount={_creationTimePositionCount}, WatchdogCorrectionCount={_watchdogCorrectionCount}, Frame={Time.frameCount}, LastClearFrame={_lastClearFrame}, LastFinalizeFrame={_lastFinalizeFrame}, WatchdogPlanSize={_watchdogRects.Count}");
+                _log?.Invoke(LogLevel.Info, $"stats: AddMoodlePostfix={_addMoodlePostfixCount}, PeriodicResort={_periodicResortCount}, SiblingFallback={_siblingSortFallbackCount}, AnchoredWrite={_anchoredSortWriteCount}, MoodlesCleared={_moodlesClearedCount}, CreationTimePosition={_creationTimePositionCount}, GhostsHidden={_ghostsHiddenCount}, PreFade={_preFadeCount}, WatchdogFinalize(expected)={_watchdogFinalizeCount}, WatchdogCorrection(unexpected)={_watchdogCorrectionCount}, FreshSetSize={(_freshManagerKey != 0 && _freshInstanceIdsByManager.TryGetValue(_freshManagerKey, out var fs) ? fs.Count : 0)}");
+                _log?.Invoke(LogLevel.Info, $"frame: Frame={Time.frameCount}, LastClearFrame={_lastClearFrame}, LastFinalizeFrame={_lastFinalizeFrame}, WatchdogPlanSize={_watchdogRects.Count}, WatchdogPlan={(_watchdogRects.Count == 0 ? "none" : (_watchdogPlanIncomplete ? "incomplete-pending-finalize" : "complete"))}");
+                _log?.Invoke(LogLevel.Info, $"sort: Enabled={_runtime.Enabled}, InGroup={DescribeInGroupSort(_config)}, UnknownPolicy={(_config != null ? _config.UnknownStatePolicy.ToString() : "unknown")}");
                 if (_manager != null)
                 {
                     Transform moodlesContainer = null;
@@ -951,18 +1096,27 @@ namespace HealthAutoArrange.Plugin
 
                 foreach (var v in visuals.OrderBy(x => x.SiblingIndex))
                 {
-                    var capture = v.Capture;
+                    // v1.2.3: scan-time capture may be null because the refresh-boundary floor
+                    // (correctly) excludes consumed captures; a manual dump wants the latest
+                    // metadata, so resolve without the floor.
+                    var capture = v.Capture ?? _captures.Resolve(v.RuntimeId, _manager, 0);
                     var pos = v.RectTransform != null ? v.RectTransform.anchoredPosition.ToString() : "n/a";
                     var diagnosticBaseId = capture != null && !string.IsNullOrWhiteSpace(capture.IconId)
                         ? MoodleIdentity.NormalizeRuntimeId(capture.IconId)
                         : MoodleIdentity.NormalizeRuntimeId(v.RuntimeId);
+                    var intensity = capture != null
+                        ? capture.Intensity
+                        : MoodleIdentity.ParseTrailingIntensity(v.RuntimeId, -1);
+                    var groupName = _config != null ? _config.ResolveGroupName(v.RuntimeId) : string.Empty;
                     _log?.Invoke(LogLevel.Info, "id=" + v.RuntimeId
                         + " base=" + diagnosticBaseId
                         + " name='" + (capture != null ? capture.DisplayName : string.Empty) + "'"
                         + " row=" + (v.IsSide ? "side" : "main")
-                        + " intensity=" + (capture != null ? capture.Intensity.ToString() : "unknown")
-                        + " critical=" + (capture != null ? capture.Critical : false)
+                        + " group='" + groupName + "'"
+                        + " intensity=" + (intensity >= 0 ? intensity.ToString() : "unknown")
+                        + " critical=" + (capture != null && capture.Critical)
                         + " seq=" + (capture != null ? capture.Sequence : -1)
+                        + " slot=" + SlotOf(visuals, v)
                         + " sibling=" + v.SiblingIndex
                         + " anchored=" + pos);
                 }
@@ -971,6 +1125,31 @@ namespace HealthAutoArrange.Plugin
             catch (Exception ex)
             {
                 LogThrottled($"Diagnostic dump failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>v1.2.3：该 moodle 在其行内按 x 升序的槽位序号（0 起）；用于 F9 诊断。</summary>
+        private static int SlotOf(List<MoodleVisual> visuals, MoodleVisual target)
+        {
+            if (target == null || target.RectTransform == null) return -1;
+            int slot = 0;
+            foreach (var v in visuals)
+            {
+                if (ReferenceEquals(v, target) || v.IsSide != target.IsSide || v.RectTransform == null) continue;
+                if (v.RectTransform.anchoredPosition.x < target.RectTransform.anchoredPosition.x) slot++;
+            }
+            return slot;
+        }
+
+        /// <summary>v1.2.3：组内排序模式的人类可读描述（F9 诊断与启动日志共用）。</summary>
+        public static string DescribeInGroupSort(ArrangeConfig config)
+        {
+            var mode = config != null ? config.InGroupSortMode : InGroupSortMode.RuleIndex;
+            switch (mode)
+            {
+                case InGroupSortMode.IntensityDesc: return "IntensityDesc (strongest first)";
+                case InGroupSortMode.IntensityAsc: return "IntensityAsc (weakest first)";
+                default: return "RuleIndex (rules order)";
             }
         }
 
@@ -1337,10 +1516,18 @@ namespace HealthAutoArrange.Plugin
             var items = new List<MoodleRowItem>(members.Count);
             for (int i = 0; i < members.Count; i++)
             {
+                // v1.2.3: per-member effect strength for the in-group intensity ordering.
+                // AddMoodle's captured intensity is exact; the trailing digit of the
+                // runtime id (game: Moodle.type = icon + intensity) is the always-available
+                // fallback and agrees with the capture for every game moodle.
+                int intensity = members[i].Capture != null
+                    ? members[i].Capture.Intensity
+                    : MoodleIdentity.ParseTrailingIntensity(members[i].RuntimeId, -1);
                 items.Add(new MoodleRowItem
                 {
                     RuntimeId = members[i].RuntimeId,
                     IsSide = members[i].IsSide,
+                    Intensity = intensity,
                     OriginalIndex = i
                 });
             }

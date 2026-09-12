@@ -29,6 +29,32 @@ Group.Infection.States = Infection
         }
 
         [Fact]
+        public void Parse_InGroupSort_DefaultsToIntensityDesc()
+        {
+            var result = ConfigTextParser.Parse("");
+            Assert.Equal(InGroupSortMode.IntensityDesc, result.Config.InGroupSortMode);
+        }
+
+        [Fact]
+        public void Parse_InGroupSort_ReadsAllModes()
+        {
+            Assert.Equal(InGroupSortMode.RuleIndex,
+                ConfigTextParser.Parse("InGroupSort = RuleIndex").Config.InGroupSortMode);
+            Assert.Equal(InGroupSortMode.IntensityAsc,
+                ConfigTextParser.Parse("InGroupSort = intensityasc").Config.InGroupSortMode);
+            Assert.Equal(InGroupSortMode.IntensityDesc,
+                ConfigTextParser.Parse("InGroupSort = IntensityDesc").Config.InGroupSortMode);
+        }
+
+        [Fact]
+        public void Parse_InvalidInGroupSort_WarnsAndDefaultsToIntensityDesc()
+        {
+            var result = ConfigTextParser.Parse("InGroupSort = Bogus");
+            Assert.Equal(InGroupSortMode.IntensityDesc, result.Config.InGroupSortMode);
+            Assert.Contains(result.Warnings, w => w.Contains("InGroupSort"));
+        }
+
+        [Fact]
         public void Parse_UnknownStatePolicy_ReadsKeep()
         {
             var result = ConfigTextParser.Parse("UnknownStatePolicy = Keep");

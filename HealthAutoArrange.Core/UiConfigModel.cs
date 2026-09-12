@@ -12,6 +12,10 @@ namespace HealthAutoArrange.Core
         public List<string> GroupOrder { get; set; } = new List<string>();
         public List<UiGroupModel> Groups { get; } = new List<UiGroupModel>();
         public UnknownStatePolicy UnknownStatePolicy { get; set; } = UnknownStatePolicy.Keep;
+
+        /// <summary>v1.2.3 组内排序：默认按效果强度从高到低（用户要求）。</summary>
+        public InGroupSortMode InGroupSortMode { get; set; } = InGroupSortMode.IntensityDesc;
+
         public List<UiReminderModel> Reminders { get; } = new List<UiReminderModel>();
 
         public static UiConfigModel FromConfig(ArrangeConfig config, bool enabled)
@@ -21,7 +25,8 @@ namespace HealthAutoArrange.Core
             {
                 Enabled = enabled,
                 GroupOrder = config.GroupOrder.ToList(),
-                UnknownStatePolicy = config.UnknownStatePolicy
+                UnknownStatePolicy = config.UnknownStatePolicy,
+                InGroupSortMode = config.InGroupSortMode
             };
             foreach (var name in config.GroupOrder)
             {
@@ -51,7 +56,8 @@ namespace HealthAutoArrange.Core
             {
                 Enabled = Enabled,
                 GroupOrder = new List<string>(GroupOrder ?? new List<string>()),
-                UnknownStatePolicy = UnknownStatePolicy
+                UnknownStatePolicy = UnknownStatePolicy,
+                InGroupSortMode = InGroupSortMode
             };
             foreach (var group in Groups)
             {
@@ -88,6 +94,7 @@ namespace HealthAutoArrange.Core
                 GroupOrder.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
                 groups,
                 UnknownStatePolicy,
+                InGroupSortMode,
                 Reminders.Select(x => new ReminderRule(
                     x.Name,
                     x.Name,
@@ -318,7 +325,8 @@ namespace HealthAutoArrange.Core
             {
                 "Enabled = " + model.Enabled.ToString().ToLowerInvariant(),
                 "GroupOrder = " + string.Join(", ", model.GroupOrder ?? new List<string>()),
-                "UnknownStatePolicy = " + model.UnknownStatePolicy
+                "UnknownStatePolicy = " + model.UnknownStatePolicy,
+                "InGroupSort = " + model.InGroupSortMode
             };
             foreach (var group in model.Groups)
                 lines.Add("Group." + (group.Name ?? string.Empty).Trim() + ".States = " + (group.StatesText ?? string.Empty).Trim());

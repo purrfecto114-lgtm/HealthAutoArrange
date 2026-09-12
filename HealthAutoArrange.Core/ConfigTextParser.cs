@@ -37,6 +37,8 @@ namespace HealthAutoArrange.Core
             var groupOrder = new List<string>();
             var groupStates = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             var policy = UnknownStatePolicy.Keep;
+            // v1.2.3: missing key => IntensityDesc (同组内按效果强度从高到低, 用户要求的默认).
+            var inGroupSort = InGroupSortMode.IntensityDesc;
             var rules = new Dictionary<string, RuleBuilder>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var rawLine in text.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.None))
@@ -81,6 +83,13 @@ namespace HealthAutoArrange.Core
                         policy = parsed;
                     else
                         warnings.Add($"UnknownStatePolicy: invalid value '{value}', using Keep.");
+                }
+                else if (string.Equals(key, "InGroupSort", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (Enum.TryParse(value, true, out InGroupSortMode parsedSort))
+                        inGroupSort = parsedSort;
+                    else
+                        warnings.Add($"InGroupSort: invalid value '{value}', using IntensityDesc. Valid: RuleIndex, IntensityDesc, IntensityAsc.");
                 }
                 else if (key.StartsWith(ReminderPrefix, StringComparison.OrdinalIgnoreCase))
                 {
@@ -147,6 +156,7 @@ namespace HealthAutoArrange.Core
                     kv => (IReadOnlyList<string>)kv.Value,
                     StringComparer.OrdinalIgnoreCase),
                 policy,
+                inGroupSort,
                 reminders);
 
             return new ConfigParseResult(config, warnings);

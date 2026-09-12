@@ -312,6 +312,12 @@ namespace HealthAutoArrange.Plugin
             if (_model.UnknownStatePolicy == UnknownStatePolicy.End)
                 GUILayout.Label(_text.UnknownMovedNote);
 
+            GUILayout.Space(6f);
+            // v1.2.3: 同组内排序（效果强度降/升序 或 规则顺序）。
+            DrawSectionHeader(_text.InGroupSort, _text.InGroupSortHelp);
+            var inGroup = DrawInGroupSort(_model.InGroupSortMode, _text);
+            if (inGroup != _model.InGroupSortMode) { _model.InGroupSortMode = inGroup; _dirty = true; }
+
             GUILayout.Space(10f);
             DrawSectionHeader(_text.Groups, _text.GroupHelp);
             DrawGroups();
@@ -1231,6 +1237,23 @@ namespace HealthAutoArrange.Plugin
         {
             if (screenHeight <= 0) return 1f;
             return Mathf.Clamp(screenHeight / DesignHeight, 1f, 2f);
+        }
+
+        private static InGroupSortMode DrawInGroupSort(InGroupSortMode current, UiTextCatalog text)
+        {
+            // Explicit mapping keeps display order stable even if enum declaration changes.
+            var names = new[]
+            {
+                text.InGroupSortOption(InGroupSortMode.IntensityDesc),
+                text.InGroupSortOption(InGroupSortMode.IntensityAsc),
+                text.InGroupSortOption(InGroupSortMode.RuleIndex)
+            };
+            int selected = current == InGroupSortMode.IntensityDesc ? 0
+                : current == InGroupSortMode.IntensityAsc ? 1 : 2;
+            selected = GUILayout.SelectionGrid(selected, names, names.Length, GUILayout.Height(24f));
+            return selected == 0 ? InGroupSortMode.IntensityDesc
+                : selected == 1 ? InGroupSortMode.IntensityAsc
+                : InGroupSortMode.RuleIndex;
         }
 
         private static UnknownStatePolicy DrawPolicy(UnknownStatePolicy current, UiTextCatalog text)

@@ -11,6 +11,10 @@ namespace HealthAutoArrange.Core
         public IReadOnlyList<string> GroupOrder { get; }
         public IReadOnlyDictionary<string, IReadOnlyList<string>> GroupStates { get; }
         public UnknownStatePolicy UnknownStatePolicy { get; }
+
+        /// <summary>v1.2.3 组内排序模式（同组内按效果强度或规则顺序排列）。</summary>
+        public InGroupSortMode InGroupSortMode { get; }
+
         public IReadOnlyList<ReminderRule> Reminders { get; }
 
         public ArrangeConfig(
@@ -18,10 +22,21 @@ namespace HealthAutoArrange.Core
             IReadOnlyDictionary<string, IReadOnlyList<string>> groupStates,
             UnknownStatePolicy unknownStatePolicy,
             IReadOnlyList<ReminderRule> reminders)
+            : this(groupOrder, groupStates, unknownStatePolicy, InGroupSortMode.RuleIndex, reminders)
+        {
+        }
+
+        public ArrangeConfig(
+            IReadOnlyList<string> groupOrder,
+            IReadOnlyDictionary<string, IReadOnlyList<string>> groupStates,
+            UnknownStatePolicy unknownStatePolicy,
+            InGroupSortMode inGroupSortMode,
+            IReadOnlyList<ReminderRule> reminders)
         {
             GroupOrder = groupOrder ?? throw new System.ArgumentNullException(nameof(groupOrder));
             GroupStates = groupStates ?? throw new System.ArgumentNullException(nameof(groupStates));
             UnknownStatePolicy = unknownStatePolicy;
+            InGroupSortMode = inGroupSortMode;
             Reminders = reminders ?? throw new System.ArgumentNullException(nameof(reminders));
         }
 
@@ -44,7 +59,7 @@ namespace HealthAutoArrange.Core
                     }
                 }
             }
-            return new SortPlan(new StateMatcher(patterns), UnknownStatePolicy);
+            return new SortPlan(new StateMatcher(patterns), UnknownStatePolicy, InGroupSortMode);
         }
 
         /// <summary>

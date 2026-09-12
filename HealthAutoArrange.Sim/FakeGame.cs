@@ -56,6 +56,20 @@ using UnityEngine;
         public string type;
         public bool isSide;
         public bool doWarningFlash;
+
+        /// <summary>v1.2.3: REAL field - Moodle.Start()/Update() fade new states in by
+        /// alpha = 1 - unTransparentTime*2 (AddMoodle sets 0.5 for newly-appearing types).
+        /// The mod's pre-fade fix reads it in the creation frame.</summary>
+        public float unTransparentTime;
+    }
+
+    /// <summary>Fake PlayerCamera: only the public members the mod's pre-fade reads
+    /// (blackAmount field + static GetUnconsciousBlack()), per the real 7.0.1 decompile.</summary>
+    public sealed class PlayerCamera : MonoBehaviour
+    {
+        public static PlayerCamera main;
+        public float blackAmount;
+        public static float GetUnconsciousBlack() => 0.5f;
     }
 
     /// <summary>Stands in for the game's WorldGeneration.unchipped static.</summary>
@@ -179,6 +193,9 @@ using UnityEngine;
 
             if (!chippedOnly || !WorldGeneration.unchipped)
             {
+                // REAL 7.0.1 AddMoodle body order (components the mod or sim touch):
+                // GameObject+Image -> SetParent -> anchors/position -> Moodle component ->
+                // "MoodleInside" child with its own Image -> pop-in (new types only).
                 var gameObject = new GameObject("Moodle" + icon);
                 gameObject.transform.SetParent(moodles); // appends as LAST sibling
                 gameObject.transform.localScale = Vector3.one;
@@ -188,9 +205,16 @@ using UnityEngine;
                 // REAL 7.0.1 creation y: criticals are born ON the wobble sine.
                 rect.anchoredPosition = new Vector2(moodleCount * 70,
                     (!critical) ? 0f : (Mathf.Sin(Time.unscaledTime * 6f) * 4f));
+                var backgroundImage = gameObject.AddComponent<UnityEngine.UI.Image>();
+                backgroundImage.sprite = "background" + intensity;
                 var moodle = gameObject.AddComponent<Moodle>();
                 moodle.type = icon + intensity.ToString();
                 moodle.isSide = sideMoodles;
+                var inside = new GameObject("MoodleInside");
+                inside.transform.SetParent(gameObject.transform);
+                inside.transform.localPosition = Vector3.zero;
+                var insideImage = inside.AddComponent<UnityEngine.UI.Image>();
+                insideImage.sprite = icon;
                 // REAL flash gate: critical && showSideMoodles. During the main block the
                 // manager's sideMoodles field is false, so the property is true (main
                 // criticals always flash); during the side block it defers to the toggle.
@@ -201,10 +225,12 @@ using UnityEngine;
                 }
                 if (!prevMoodles.Contains(moodle.type))
                 {
-                    // Pop-in animation start: +75 on y and 2.5 scale; Moodle.Update lerps
-                    // these back toward (wobble y, scale 1) every frame.
+                    // Pop-in animation start: +75 on y, 2.5 scale, AND (v1.2.3 faithful)
+                    // unTransparentTime = 0.5 - the fade-in the game applies via
+                    // Moodle.Start()/Update() colors on the NEXT frame.
                     rect.anchoredPosition += Vector2.up * 75f;
                     gameObject.transform.localScale = Vector3.one * 2.5f;
+                    moodle.unTransparentTime = 0.5f;
                 }
                 if (!sideMoodles)
                 {

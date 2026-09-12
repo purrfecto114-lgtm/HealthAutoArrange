@@ -4,6 +4,21 @@ using System.Collections.Generic;
 namespace HealthAutoArrange.Core
 {
     /// <summary>
+    /// 组内排序模式（v1.2.3）：
+    /// - <see cref="RuleIndex"/>：组内按规则文件声明顺序（历史行为）；
+    /// - <see cref="IntensityDesc"/>：组内按当前效果强度从高到低（默认；同级回退规则顺序）；
+    /// - <see cref="IntensityAsc"/>：组内按当前效果强度从低到高（同级回退规则顺序）。
+    /// 强度来源：AddMoodle 捕获的 intensity，缺失时回退 runtime id 末尾数字
+    /// （游戏 Moodle.type = 图标名 + 强度，如 "pain2" → 2）。
+    /// </summary>
+    public enum InGroupSortMode
+    {
+        RuleIndex = 0,
+        IntensityDesc = 1,
+        IntensityAsc = 2,
+    }
+
+    /// <summary>
     /// 渲染/重排模式（移植自 MoodleSorter_Source 的 RenderMode）。
     /// </summary>
     public enum RenderMode
@@ -28,6 +43,9 @@ namespace HealthAutoArrange.Core
 
         /// <summary>所在行：true = side 行，false = main 行。</summary>
         public bool IsSide { get; set; }
+
+        /// <summary>当前效果强度（0-8）；未知为 -1（排序时按最低处理）。</summary>
+        public int Intensity { get; set; } = -1;
 
         /// <summary>在输入列表中的原始索引。</summary>
         public int OriginalIndex { get; set; }
@@ -62,8 +80,8 @@ namespace HealthAutoArrange.Core
 
             var result = new Dictionary<bool, IReadOnlyList<int>>
             {
-                [false] = plan.Apply(ToRuntimeIds(main)),
-                [true] = plan.Apply(ToRuntimeIds(side)),
+                [false] = plan.Apply(ToRuntimeIds(main), ToIntensities(main)),
+                [true] = plan.Apply(ToRuntimeIds(side), ToIntensities(side)),
             };
             return result;
         }
@@ -73,6 +91,15 @@ namespace HealthAutoArrange.Core
             var ids = new string[items.Count];
             for (var i = 0; i < items.Count; i++) ids[i] = items[i].RuntimeId;
             return ids;
+        }
+
+        private static IReadOnlyList<int> ToIntensities(List<MoodleRowItem> items)
+        {
+            // v1.2.3: per-member effect strength for the in-group intensity ordering.
+            // Unknown stays -1 (SortPlan treats it as the lowest strength).
+            var intensities = new int[items.Count];
+            for (var i = 0; i < items.Count; i++) intensities[i] = items[i].Intensity;
+            return intensities;
         }
     }
 

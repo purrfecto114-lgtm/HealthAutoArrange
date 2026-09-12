@@ -43,7 +43,7 @@ internal static class Program
         /// MoodleManager is undefined; the adapter must hold order in both orders.</summary>
         public bool GameUpdateFirst = true;
 
-        public Harness()
+        public Harness(InGroupSortMode inGroupSort = InGroupSortMode.RuleIndex)
         {
             var config = new ArrangeConfig(
                 new List<string> { "Critical", "Watch" },
@@ -53,6 +53,7 @@ internal static class Program
                     ["Watch"] = new List<string> { "bleeding*", "brokenleg*", "wet*", "adrenaline*" },
                 },
                 UnknownStatePolicy.Keep,
+                inGroupSort,
                 new List<ReminderRule>());
             var log = new BepInEx.Logging.ManualLogSource((level, msg) => Logs.Add((level, msg)));
             var dispatcher = new ReminderDispatcher(log);
@@ -61,6 +62,34 @@ internal static class Program
                 (level, msg) => Logs.Add((level, msg)), null);
             Adapter.Reconfigure(config, enabled: true);
             Manager = new MoodleManager(Adapter);
+            // v1.2.3: the pre-fade fix reads PlayerCamera.main/blackAmount (public members
+            // in the real assembly). Awake/normal play: conscious, no black fade.
+            PlayerCamera.main = new PlayerCamera { blackAmount = 0f };
+        }
+
+        /// <summary>v1.2.3 helper: force the next game Update tick to run the full
+        /// UpdateMoodles rebuild (the 0.5s timer otherwise delays it 30 frames).</summary>
+        public void ForceRebuild()
+        {
+            Manager.updateTime = 0f;
+        }
+
+        /// <summary>v1.2.3 helper: the root/inside Image colors of a moodle icon, as the
+        /// game's Moodle.Start() would set them next frame (used by the pre-fade scenario).</summary>
+        public (Color root, Color inside) ColorsOf(string type)
+        {
+            for (int i = 0; i < Manager.moodles.childCount; i++)
+            {
+                var child = Manager.moodles.GetChild(i);
+                var m = child?.GetComponent<Moodle>();
+                if (m == null || m.type != type) continue;
+                var root = child.GetComponent<UnityEngine.UI.Image>();
+                var inside = child.childCount > 0
+                    ? child.GetChild(0).GetComponent<UnityEngine.UI.Image>()
+                    : null;
+                return (root != null ? root.color : default, inside != null ? inside.color : default);
+            }
+            throw new InvalidOperationException("type not found: " + type);
         }
 
         /// <summary>Advance one full frame: game update, adapter update, Moodle behaviour,
@@ -643,6 +672,238 @@ internal static class Program
                         Join(ExpectedOrder(h.VisualOrder())) == Join(h.VisualOrder()));
                     if (h.Failures.Count > 0) break;
                 }
+                scenarios++;
+            }
+
+            // ---------------------------------------------------------------
+            // Scenario 10 (v1.2.3): ghost-hide on the rebuild frame. The game's
+            // ClearMoodles defers Object.Destroy to end of frame, so the OLD icons
+            // would render one more frame OVERLAPPING the new arrangement ("闪现").
+            // The mod must deactivate every destroy-pending child inside the
+            // ClearMoodles postfix, while every NEW child stays active.
+            // ---------------------------------------------------------------
+            {
+                var h = new Harness();
+                h.Manager.CurrentStates.AddRange(new[]
+                {
+                    ("bleeding", 2, false, false),
+                    ("brokenleg", 1, false, false),
+                    ("wet", 3, false, false),
+                });
+                h.ForceRebuild();
+                h.Frame(); // first rebuild settles the row
+                h.Frame();
+
+                // Snapshot the old icon GameObjects, then run a REBUILD frame manually so
+                // assertions can inspect the hierarchy BETWEEN Manager.Update and the
+                // end-of-frame destroy pass (Frame() would hide that window).
+                var oldIcons = new List<UnityEngine.GameObject>();
+                for (int i = 0; i < h.Manager.moodles.childCount; i++)
+                {
+                    oldIcons.Add(h.Manager.moodles.GetChild(i).gameObject);
+                }
+                h.Manager.CurrentStates.Clear();
+                h.Manager.CurrentStates.AddRange(new[]
+                {
+                    ("wet", 3, false, false),
+                    ("bleeding", 2, false, false),
+                    ("adrenaline", 1, false, false),
+                });
+
+                Time.unscaledDeltaTime = 1f / 60f;
+                Time.deltaTime = 1f / 60f;
+                Time.unscaledTime += 1f / 60f;
+                Time.realtimeSinceStartup += 1f / 60f;
+                Time.frameCount++;
+                h.ForceRebuild();
+                h.Manager.Update(); // rebuild frame: ClearMoodles + AddAllMoodles
+
+                // NEW icons = active Moodle children. In deferred-fake-null mode (the REAL
+                // Unity semantic: Object.Destroy only nulls the wrapper at end of frame)
+                // the old destroy-pending icons are still enumerable but must be hidden;
+                // in immediate mode they are already fake-null and skipped everywhere.
+                int newActive = 0, newTotal = 0;
+                for (int i = 0; i < h.Manager.moodles.childCount; i++)
+                {
+                    var child = h.Manager.moodles.GetChild(i);
+                    if (child == null) continue;
+                    var m = child.GetComponent<Moodle>();
+                    if (m == null) continue; // bonus etc.
+                    if (!child.gameObject.activeSelf) continue; // hidden ghost (old icon)
+                    newTotal++;
+                    if (child.gameObject.activeSelf) newActive++;
+                }
+                // The rebuild MUST have run for this scenario to be meaningful (guards
+                // against a vacuous pass if the timer semantics ever change).
+                h.Assert("S10-" + mode, "rebuild did not run (scenario would pass vacuously)",
+                    newTotal == 3, $"newIcons={newTotal}");
+
+                // OLD icons: destroy-pending AND hidden (this is the render fix). Only
+                // assertable in deferred mode: real Unity keeps destroy-pending wrappers
+                // alive (non-null) during the destruction frame, which is exactly when the
+                // mod can see and deactivate them. Immediate mode models a hypothetical
+                // semantics where the wrapper is already null - nothing to deactivate.
+                if (!immediateFakeNull)
+                {
+                    foreach (var oldIcon in oldIcons)
+                    {
+                        h.Assert("S10-" + mode, "old icon still active during rebuild frame (double-render ghost)",
+                            !oldIcon.activeSelf);
+                    }
+                }
+                h.Assert("S10-" + mode, $"new icons inactive after rebuild ({newActive}/{newTotal})",
+                    newActive == newTotal);
+                // Ghosts are still children (destroy is deferred) - the hide must not
+                // have removed them from the hierarchy.
+                h.Assert("S10-" + mode, "destroy-pending icons vanished early (childCount dropped in-frame)",
+                    h.Manager.moodles.childCount >= newTotal + oldIcons.Count,
+                    $"childCount={h.Manager.moodles.childCount} new={newTotal} old={oldIcons.Count}");
+
+                SimEngine.EndFrame(); // deferred destroy pass
+                h.Assert("S10-" + mode, "ghosts not destroyed at end of frame",
+                    h.Manager.moodles.childCount == newTotal,
+                    $"childCount={h.Manager.moodles.childCount} expected {newTotal}");
+
+                // Order still authoritative afterwards.
+                h.Adapter.Update();
+                h.Assert("S10-" + mode, "order lost after ghost-hide rebuild",
+                    Join(ExpectedOrder(h.VisualOrder())) == Join(h.VisualOrder()),
+                    $"got {Join(h.VisualOrder())} expected {Join(ExpectedOrder(h.VisualOrder()))}");
+                scenarios++;
+            }
+
+            // ---------------------------------------------------------------
+            // Scenario 11 (v1.2.3): creation-frame pre-fade. AddMoodle builds icon
+            // Images with Unity's default color (white, alpha 1) and Moodle.Start()
+            // only runs NEXT frame - so newly-appearing states (fade-in alpha 0 at
+            // creation) rendered one fully-opaque frame ("闪现"). The mod must
+            // pre-apply Start's exact colors in the AddMoodle postfix.
+            // ---------------------------------------------------------------
+            {
+                var h = new Harness();
+                h.Manager.CurrentStates.AddRange(new[]
+                {
+                    ("bleeding", 2, false, false), // exists from cycle 1
+                });
+                h.ForceRebuild();
+                h.Frame();
+                h.Frame();
+
+                // A NEW state appears mid-run (pop-in + fade-in).
+                h.Manager.CurrentStates.Add(("wet", 1, false, false));
+                h.ForceRebuild();
+                h.Frame(); // rebuild frame that creates wet1 (new) + bleeding2 (existing)
+
+                var (newRoot, newInside) = h.ColorsOf("wet1");
+                var (oldRoot, oldInside) = h.ColorsOf("bleeding2");
+                // Conscious (blackAmount 0 < 0.5): background alpha = 1 - ut*2, inside = 1 - ut*2.
+                // New state (ut=0.5): alpha 0 - fully faded at the creation frame, exactly
+                // what Moodle.Start will assert next frame. Existing state (ut=0): alpha 1.
+                h.Assert("S11-" + mode, "new state root Image not pre-faded (opaque flash frame)",
+                    Mathf.Abs(newRoot.a - 0f) < 0.001f, $"root.a={newRoot.a}");
+                h.Assert("S11-" + mode, "new state inside Image not pre-faded (opaque flash frame)",
+                    Mathf.Abs(newInside.a - 0f) < 0.001f, $"inside.a={newInside.a}");
+                h.Assert("S11-" + mode, "existing state root Image color drifted",
+                    Mathf.Abs(oldRoot.a - 1f) < 0.001f, $"root.a={oldRoot.a}");
+                h.Assert("S11-" + mode, "existing state inside Image color drifted",
+                    Mathf.Abs(oldInside.a - 1f) < 0.001f, $"inside.a={oldInside.a}");
+
+                // Unconscious black-fade path: blackAmount >= GetUnconsciousBlack() makes
+                // the game hide icons (background alpha 0 - ut*2). Pre-fade must match.
+                PlayerCamera.main.blackAmount = 0.7f;
+                h.Manager.CurrentStates.Add(("adrenaline", 2, false, false));
+                h.ForceRebuild();
+                h.Frame();
+                var (unRoot, unInside) = h.ColorsOf("adrenaline2");
+                h.Assert("S11-" + mode, "unconscious background alpha not game-formula",
+                    Mathf.Abs(unRoot.a - (0f - 1f)) < 0.001f, $"root.a={unRoot.a} expected -1 (game clamps in shader)");
+                h.Assert("S11-" + mode, "unconscious inside alpha not game-formula",
+                    Mathf.Abs(unInside.a - 0f) < 0.001f, $"inside.a={unInside.a}");
+                PlayerCamera.main.blackAmount = 0f;
+                scenarios++;
+            }
+
+            // ---------------------------------------------------------------
+            // Scenario 12 (v1.2.3): in-group intensity ordering. Same group, mixed
+            // current intensities: x order must follow effect strength (desc default,
+            // asc configurable), tie-breaking by rules order. RuleIndex mode (the
+            // legacy harness) must be UNCHANGED - backward compatibility.
+            // ---------------------------------------------------------------
+            {
+                // IntensityDesc: strongest first within the Watch group.
+                var hd = new Harness(InGroupSortMode.IntensityDesc);
+                hd.Manager.CurrentStates.AddRange(new[]
+                {
+                    ("bleeding", 2, false, false),
+                    ("brokenleg", 0, false, false),
+                    ("wet", 3, false, false),
+                    ("adrenaline", 1, false, false),
+                });
+                hd.ForceRebuild();
+                hd.Frame();
+                hd.Frame();
+                var expectedDesc = new List<string> { "wet3", "bleeding2", "adrenaline1", "brokenleg0" };
+                hd.Assert("S12-" + mode, "IntensityDesc order wrong",
+                    Join(hd.VisualOrder()) == Join(expectedDesc),
+                    $"got {Join(hd.VisualOrder())} expected {Join(expectedDesc)}");
+                // Steady cycles keep it.
+                for (int i = 0; i < 120; i++)
+                {
+                    hd.Frame();
+                    hd.Assert("S12-" + mode, $"IntensityDesc order lost on frame {Time.frameCount}",
+                        Join(hd.VisualOrder()) == Join(expectedDesc));
+                    if (hd.Failures.Count > 0) break;
+                }
+                // Intensity change re-orders within the group (the point of the feature).
+                hd.Manager.CurrentStates.Clear();
+                hd.Manager.CurrentStates.AddRange(new[]
+                {
+                    ("bleeding", 4, false, false),
+                    ("brokenleg", 0, false, false),
+                    ("wet", 2, false, false),
+                    ("adrenaline", 1, false, false),
+                });
+                hd.ForceRebuild();
+                hd.Frame();
+                hd.Frame();
+                var expectedDesc2 = new List<string> { "bleeding4", "wet2", "adrenaline1", "brokenleg0" };
+                hd.Assert("S12-" + mode, "IntensityDesc reorder on severity change wrong",
+                    Join(hd.VisualOrder()) == Join(expectedDesc2),
+                    $"got {Join(hd.VisualOrder())} expected {Join(expectedDesc2)}");
+
+                // IntensityAsc: weakest first.
+                var ha = new Harness(InGroupSortMode.IntensityAsc);
+                ha.Manager.CurrentStates.AddRange(new[]
+                {
+                    ("bleeding", 2, false, false),
+                    ("brokenleg", 0, false, false),
+                    ("wet", 3, false, false),
+                    ("adrenaline", 1, false, false),
+                });
+                ha.ForceRebuild();
+                ha.Frame();
+                ha.Frame();
+                var expectedAsc = new List<string> { "brokenleg0", "adrenaline1", "bleeding2", "wet3" };
+                ha.Assert("S12-" + mode, "IntensityAsc order wrong",
+                    Join(ha.VisualOrder()) == Join(expectedAsc),
+                    $"got {Join(ha.VisualOrder())} expected {Join(expectedAsc)}");
+
+                // RuleIndex (legacy default for programmatic construction): rules order.
+                var hr = new Harness(InGroupSortMode.RuleIndex);
+                hr.Manager.CurrentStates.AddRange(new[]
+                {
+                    ("bleeding", 2, false, false),
+                    ("brokenleg", 0, false, false),
+                    ("wet", 3, false, false),
+                    ("adrenaline", 1, false, false),
+                });
+                hr.ForceRebuild();
+                hr.Frame();
+                hr.Frame();
+                var expectedRule = new List<string> { "bleeding2", "brokenleg0", "wet3", "adrenaline1" };
+                hr.Assert("S12-" + mode, "RuleIndex (legacy) order wrong",
+                    Join(hr.VisualOrder()) == Join(expectedRule),
+                    $"got {Join(hr.VisualOrder())} expected {Join(expectedRule)}");
                 scenarios++;
             }
         }

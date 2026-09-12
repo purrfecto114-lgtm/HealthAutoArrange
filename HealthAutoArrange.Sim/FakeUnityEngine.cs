@@ -200,9 +200,13 @@ namespace UnityEngine
 
         public Transform transform => RectTransform;
 
-        public bool activeInHierarchy => !IsFakeNull;
+        internal bool ActiveSelf = true;
 
-        public bool activeSelf => true;
+        /// <summary>v1.2.3: active state is now modeled (the mod deactivates destroy-pending
+        /// ghosts during the rebuild frame); destroy-pending still counts as fake-null only.</summary>
+        public bool activeInHierarchy => ActiveSelf && !IsFakeNull;
+
+        public bool activeSelf => ActiveSelf;
 
         public T AddComponent<T>() where T : Component, new()
         {
@@ -224,7 +228,10 @@ namespace UnityEngine
 
         public void SetActive(bool value)
         {
-            // Not modeled beyond existence; the sort pipeline only reads activeInHierarchy.
+            // v1.2.3: modeled for the ghost-hide fix (deactivate destroy-pending icons so the
+            // rebuild frame renders only the new arrangement). No callback side effects exist
+            // on any game component (Image/UITooltip/Moodle define no OnDisable).
+            ActiveSelf = value;
         }
     }
 
@@ -323,4 +330,14 @@ namespace UnityEngine.UI
     public class HorizontalLayoutGroup : MonoBehaviour { }
     public class VerticalLayoutGroup : MonoBehaviour { }
     public class GridLayoutGroup : MonoBehaviour { }
+
+    /// <summary>v1.2.3: minimal Image - the mod's pre-fade fix reads/writes .color on the
+    /// root background Image and the "MoodleInside" foreground Image, exactly like the real
+    /// game's Moodle.Start() does next frame.</summary>
+    public class Image : MonoBehaviour
+    {
+        public Color color = new Color(1f, 1f, 1f, 1f);
+        public string sprite;
+        public bool enabled = true;
+    }
 }

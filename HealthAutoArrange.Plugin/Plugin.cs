@@ -19,7 +19,7 @@ namespace HealthAutoArrange.Plugin
     /// 单个可选补丁目标缺失时降级并记录；运行期可捕获的托管异常尽量隔离。
     /// 不宣称能够吞掉 Unity 原生层故障，也不把 ABI/依赖不匹配伪装成“安全可继续”。
     /// </summary>
-    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.2.2")]
+    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.2.3")]
     public class Plugin : BaseUnityPlugin,
         IFallbackSettingsActions,
         IFallbackSettingsStateActions,
@@ -130,6 +130,7 @@ namespace HealthAutoArrange.Plugin
             Logger.LogInfo($"Rules file: {_rulesPath}");
             _uiModel = LoadRulesModel(parseResult.Config);
             ApplyModel(_uiModel);
+            Logger.LogInfo($"In-group ordering: {UnityUiAdapter.DescribeInGroupSort(parseResult.Config)} [InGroupSort={parseResult.Config.InGroupSortMode}].");
 
             // 5. 启动更新检查：仅从 GitHub 读取签名清单并提醒，不下载或安装文件。
             _updater = new SafeUpdater(
@@ -159,9 +160,9 @@ namespace HealthAutoArrange.Plugin
                 //   - ClearMoodles: start-of-cycle reset for the per-cycle accumulation.
                 var boundaryNames = new[]
                 {
-                    new { Patch = nameof(GamePatches.MoodleRefreshPostfix), Target = "UpdateMoodles", Label = "UpdateMoodles (0.5s timer path)" },
-                    new { Patch = nameof(GamePatches.AddAllMoodlesPostfix), Target = "AddAllMoodles", Label = "AddAllMoodles (lowest rebuild boundary, v1.2.2)" },
-                    new { Patch = nameof(GamePatches.ClearMoodlesPostfix), Target = "ClearMoodles", Label = "ClearMoodles (cycle reset, v1.2.2)" }
+                    new { Patch = nameof(GamePatches.MoodleRefreshPostfix), Target = "UpdateMoodles", Label = "UpdateMoodles (0.5s timer path; postfix dedupes against AddAllMoodles same-frame finalize)" },
+                    new { Patch = nameof(GamePatches.AddAllMoodlesPostfix), Target = "AddAllMoodles", Label = "AddAllMoodles (lowest rebuild boundary; same-frame finalize)" },
+                    new { Patch = nameof(GamePatches.ClearMoodlesPostfix), Target = "ClearMoodles", Label = "ClearMoodles (cycle reset + ghost-hide, v1.2.3)" }
                 };
                 int boundariesPatched = 0;
                 foreach (var boundary in boundaryNames)
@@ -204,7 +205,7 @@ namespace HealthAutoArrange.Plugin
                         addMoodle,
                         prefix: new HarmonyMethod(typeof(GamePatches), nameof(GamePatches.AddMoodlePrefix)),
                         postfix: new HarmonyMethod(typeof(GamePatches), nameof(GamePatches.AddMoodlePostfix)));
-                    Logger.LogInfo("Patched MoodleManager.AddMoodle capture (prefix) + fresh-set tracker (postfix, v1.2.0).");
+                    Logger.LogInfo("Patched MoodleManager.AddMoodle capture (prefix) + fresh-set tracker/creation-time positioning/pre-fade (postfix).");
                 }
             }
             catch (Exception ex)
@@ -540,12 +541,13 @@ namespace HealthAutoArrange.Plugin
                 Logger.LogInfo("----- HealthAutoArrange patch diagnostics -----");
                 Logger.LogInfo($"  MoodleRefreshPostfix invoked: {GamePatches.MoodleRefreshPostfixInvoked} (count: {GamePatches.MoodleRefreshInvokeCount})");
                 Logger.LogInfo($"  AddMoodlePrefix      invoked: {GamePatches.AddMoodlePrefixInvoked} (count: {GamePatches.AddMoodleInvokeCount})");
-                Logger.LogInfo($"  AddMoodlePostfix     invoked: {GamePatches.AddMoodlePostfixInvoked} (count: {GamePatches.AddMoodlePostfixInvokeCount})  [v1.2.0]");
-                Logger.LogInfo($"  AddAllMoodlesPostfix invoked: {GamePatches.AddAllMoodlesPostfixInvoked} (count: {GamePatches.AddAllMoodlesInvokeCount})  [v1.2.2]");
-                Logger.LogInfo($"  ClearMoodlesPostfix  invoked: {GamePatches.ClearMoodlesPostfixInvoked} (count: {GamePatches.ClearMoodlesInvokeCount})  [v1.2.2]");
+                Logger.LogInfo($"  AddMoodlePostfix     invoked: {GamePatches.AddMoodlePostfixInvoked} (count: {GamePatches.AddMoodlePostfixInvokeCount})");
+                Logger.LogInfo($"  AddAllMoodlesPostfix invoked: {GamePatches.AddAllMoodlesPostfixInvoked} (count: {GamePatches.AddAllMoodlesInvokeCount})");
+                Logger.LogInfo($"  ClearMoodlesPostfix  invoked: {GamePatches.ClearMoodlesPostfixInvoked} (count: {GamePatches.ClearMoodlesInvokeCount})");
                 Logger.LogInfo($"  IsPointerOverUIElementPostfix invoked: {GamePatches.PointerOverUiPostfixInvoked}");
                 Logger.LogInfo($"  Settings window open now: {SettingsWindowOpen}");
                 Logger.LogInfo($"  Auto-arrange Enabled: {(_uiModel?.Enabled ?? false)}");
+                Logger.LogInfo($"  In-group ordering: {UnityUiAdapter.DescribeInGroupSort(_uiModel?.ToConfig())} [InGroupSort={_uiModel?.InGroupSortMode}]");
                 Logger.LogInfo($"  Adapter alive: {(Adapter != null ? "yes" : "no")}");
                 Logger.LogInfo($"  Manager tracked: {(Adapter != null ? "yes" : "no")}");
                 Logger.LogInfo("----- end patch diagnostics -----");
@@ -822,6 +824,8 @@ namespace HealthAutoArrange.Plugin
                 "Comma-separated group order. The starter groups are intentionally empty; assign states observed in-game from the F8 window.");
             Config.Bind("General", "UnknownStatePolicy", "Keep",
                 "Unknown state policy: Keep (recommended; preserve position) or End (move unknown states to end).");
+            Config.Bind("General", "InGroupSort", "IntensityDesc",
+                "v1.2.3: in-group ordering. IntensityDesc = order by current effect strength, strongest first (default); IntensityAsc = weakest first; RuleIndex = order states as declared per group. Rules-file key: InGroupSort.");
             Config.Bind("Groups", "Group.Priority 1.States", string.Empty,
                 "Highest-priority observed Moodle patterns. Prefer assigning them from the in-game state catalog.");
             Config.Bind("Groups", "Group.Priority 2.States", string.Empty,

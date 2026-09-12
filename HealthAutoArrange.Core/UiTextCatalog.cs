@@ -103,8 +103,25 @@ namespace HealthAutoArrange.Core
             : "Keep position is safest: new-game or third-party moodles are not silently demoted. Move to end is best only when your rules cover almost every status.";
 
         public string GroupHelp => _chinese
-            ? "分组从上到下代表从前到后；同组按状态列表顺序。主 Moodle 与 side Moodle 始终分别排序，不会混到同一行。"
-            : "Groups run from highest/earliest to lowest/latest. States within a group keep their listed order. Main and side moodles are always sorted separately.";
+            ? "分组从上到下代表从前到后；同组默认按当前效果强度从高到低排列（可在“同组内排序”里改）。主 Moodle 与 side Moodle 始终分别排序，不会混到同一行。"
+            : "Groups run from highest/earliest to lowest/latest. Within a group, states order by current effect intensity, strongest first, by default (changeable under In-group order). Main and side moodles are always sorted separately.";
+
+        public string InGroupSort => _chinese ? "同组内排序" : "In-group order";
+
+        public string InGroupSortHelp => _chinese
+            ? "同一分组内的状态按当前效果强度（图标名末尾的数字，0-8）排列，还是按规则文件里的声明顺序。同强度时回退规则顺序。强度数据来自游戏 AddMoodle 调用，图标 id 末尾数字作为兜底。"
+            : "Order states inside each group by current effect intensity (the trailing digit of the moodle id, 0-8) or by their declared order in the rules file. Equal intensity falls back to rules order. Intensity comes from the game's AddMoodle call, with the trailing id digit as fallback.";
+
+        public string InGroupSortOption(InGroupSortMode mode)
+        {
+            switch (mode)
+            {
+                case InGroupSortMode.IntensityDesc: return _chinese ? "强度高→低（默认）" : "Strongest first (default)";
+                case InGroupSortMode.IntensityAsc: return _chinese ? "强度低→高" : "Weakest first";
+                case InGroupSortMode.RuleIndex: return _chinese ? "规则顺序" : "Rules order";
+                default: return mode.ToString();
+            }
+        }
 
         public string CatalogHelp => _chinese
             ? "这里列出的不是 Wiki 推测值，而是本 Mod 实际在 UI 中观察到的 Moodle。不同强度通常归并为同一基础状态；游戏条件、脑芯片、健康面板/悬停会影响哪些状态能出现。"
