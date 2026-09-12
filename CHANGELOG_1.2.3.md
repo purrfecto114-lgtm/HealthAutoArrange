@@ -86,6 +86,14 @@ F8 设置窗口与透明提醒覆盖层自 v1.2.2 起即按屏幕高度做 1x-2x
   critical/捕获序号；强度额外回退图标 id 末尾数字（游戏恒可解析）；
 - 启动日志与补丁诊断删除过时版本标签，新增组内排序模式行。
 
+### 7. CI 构建引用桩补齐（发布链修复）
+tag 触发的 Release 构建使用仓库内 Mono.Cecil 桩（不再依赖已失效的 GAME_REFS_URL
+secret）。v1.2.3 新调用的四个成员已补入桩并按真实 7.0.1 程序集逐一核对成员形态
+（字段/方法/属性与真实程序集完全一致，含一处历史 ABI 纠正：桩内 `PlayerCamera.main`
+原为属性、真实游戏为 public static 字段，已改正——否则按桩编译的 DLL 在运行时
+`get_main` 会 MissingMethodException）。桩构建产物反编译验证：`main`/`blackAmount`/
+`unTransparentTime` 均为字段访问、`GetUnconsciousBlack`/`set_color` 为方法调用。
+
 ## 行为级验证（模拟器 = 真实 7.0.1 地面真相）
 
 `HealthAutoArrange.Sim`（真实 `UnityUiAdapter.cs` 源码 + 忠实假游戏）新增三个场景，

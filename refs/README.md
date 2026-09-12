@@ -12,10 +12,20 @@ This directory contains compile-time-only reference assemblies for building `Hea
 | `CasualtiesUnknown_Data/Managed/UnityEngine.TextRenderingModule.dll` | NuGet `UnityEngine.TextRenderingModule` 2020.3.1 | MIT |
 | `CasualtiesUnknown_Data/Managed/UnityEngine.dll` | Mono.Cecil-generated facade with `TypeForwardedTo` for 16 CoreModule types + `Input` forward + `JsonUtility` stub | Project MIT |
 | `CasualtiesUnknown_Data/Managed/UnityEngine.InputLegacyModule.dll` | Mono.Cecil stub (`UnityEngine.Input.GetKeyDown`) | Project MIT |
-| `CasualtiesUnknown_Data/Managed/UnityEngine.UI.dll` | Mono.Cecil stub (`HorizontalLayoutGroup`, `VerticalLayoutGroup`, `GridLayoutGroup`) | Project MIT |
+| `CasualtiesUnknown_Data/Managed/UnityEngine.UI.dll` | Mono.Cecil stub (`HorizontalLayoutGroup`, `VerticalLayoutGroup`, `GridLayoutGroup`, `Image` with `color` property) | Project MIT |
 | `CasualtiesUnknown_Data/Managed/UnityEngine.SharedInternalsModule.dll` | Mono.Cecil stub (empty, referenced by CoreModule) | Project MIT |
 | `CasualtiesUnknown_Data/Managed/UnityEngine.UnityWebRequestModule.dll` | Mono.Cecil stub (`UnityWebRequest`, `DownloadHandler`, `DownloadHandlerFile`, `UnityWebRequestAsyncOperation`) | Project MIT |
 | `CasualtiesUnknown_Data/Managed/Assembly-CSharp.dll` | Mono.Cecil stub (`MoodleManager`, `UIUtil`, `Moodle`, `PlayerCamera`) | Project MIT |
+
+## v1.2.3 stub update (ABI parity)
+
+The mod's v1.2.3 render-phase code calls four additional game/Unity members. The Cecil stubs were patched accordingly (one-off `Mono.Cecil` patcher; member shapes verified against the real 7.0.1 assemblies):
+
+- `UnityEngine.UI.Image` class with a `color` property (get/set, `UnityEngine.Color`) — matches the real `Graphic.color` accessor shape.
+- `Moodle.unTransparentTime` — public instance `float` field (real: public field).
+- `PlayerCamera.blackAmount` — public instance `float` field (real: public field).
+- `PlayerCamera.GetUnconsciousBlack()` — public static `float` method (real: public static method; stub body returns `0f`).
+- **ABI correction**: `PlayerCamera.main` in the stub was previously declared as a *property*; the real game declares it as a public static **field**. A property-shaped stub would make a stub-built DLL emit `call get_main()`, which throws `MissingMethodException` against the real game. It is now a public static field, matching the real assembly.
 
 ## Why these are safe to commit
 
