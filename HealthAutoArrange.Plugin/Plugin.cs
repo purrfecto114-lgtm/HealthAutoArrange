@@ -52,6 +52,7 @@ namespace HealthAutoArrange.Plugin
         private SafeUpdater _updater;
         private string _pendingUpdateVersion;
         private string _statusMessage = string.Empty;
+        private const float BadgeDesignHeight = 1080f;  // v1.2.3 DPI: matches FallbackSettingsWindow/TransparentReminderOverlay
         private float _statusMessageUntil;
 
         private void Awake()
@@ -397,8 +398,17 @@ namespace HealthAutoArrange.Plugin
                 var padding = 6f;
                 var w = size.x + padding * 2f;
                 var h = size.y + padding * 2f;
+                // v1.2.3 DPI: apply the SAME 1x-2x scaling (Screen.height / 1080) as the
+                // F8 settings window and the reminder overlay, so the badge (and the
+                // transient hotkey status messages it shows) stay readable on 1440p/4K.
+                // Without this the badge was the only unscaled IMGUI element: at 4K it
+                // rendered at half the relative size of every other mod UI. Badge coords
+                // are now virtual (pre-matrix) pixels; IMGUI transforms input to match.
+                var scale = Screen.height > 0 ? Mathf.Clamp(Screen.height / BadgeDesignHeight, 1f, 2f) : 1f;
+                GUI.matrix = previousMatrix * Matrix4x4.Scale(new Vector3(scale, scale, 1f));
+                var virtualWidth = Screen.width > 0 ? Screen.width / scale : 1280f;
                 // Move the badge to the top-right when F8 window is open, top-left otherwise.
-                var x = SettingsWindowOpen ? Screen.width - w - 8f : 8f;
+                var x = SettingsWindowOpen ? virtualWidth - w - 8f : 8f;
                 var y = 8f;
                 GUI.color = new Color(0f, 0f, 0f, 0.55f);
                 GUI.Box(new Rect(x, y, w, h), GUIContent.none, style);
