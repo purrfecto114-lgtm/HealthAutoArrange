@@ -55,6 +55,38 @@ Group.Infection.States = Infection
         }
 
         [Fact]
+        public void Parse_SuppressTierPopIn_DefaultsToTrue()
+        {
+            var result = ConfigTextParser.Parse("");
+            Assert.True(result.Config.SuppressTierPopIn);
+        }
+
+        [Fact]
+        public void Parse_SuppressTierPopIn_ReadsTrueAndFalse()
+        {
+            Assert.True(ConfigTextParser.Parse("SuppressTierPopIn = true").Config.SuppressTierPopIn);
+            Assert.False(ConfigTextParser.Parse("SuppressTierPopIn = False").Config.SuppressTierPopIn);
+        }
+
+        [Fact]
+        public void Parse_InvalidSuppressTierPopIn_WarnsAndDefaultsToTrue()
+        {
+            var result = ConfigTextParser.Parse("SuppressTierPopIn = Bogus");
+            Assert.True(result.Config.SuppressTierPopIn);
+            Assert.Contains(result.Warnings, w => w.Contains("SuppressTierPopIn"));
+        }
+
+        [Fact]
+        public void UiConfigModel_RoundTripsSuppressTierPopIn()
+        {
+            var model = new UiConfigModel { SuppressTierPopIn = false };
+            var text = UiConfigTextSerializer.Serialize(model);
+            Assert.Contains("SuppressTierPopIn = false", text);
+            var reparsed = ConfigTextParser.Parse(text);
+            Assert.False(reparsed.Config.SuppressTierPopIn);
+        }
+
+        [Fact]
         public void Parse_UnknownStatePolicy_ReadsKeep()
         {
             var result = ConfigTextParser.Parse("UnknownStatePolicy = Keep");

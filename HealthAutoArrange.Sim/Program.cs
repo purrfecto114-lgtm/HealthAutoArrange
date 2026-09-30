@@ -43,7 +43,8 @@ internal static class Program
         /// MoodleManager is undefined; the adapter must hold order in both orders.</summary>
         public bool GameUpdateFirst = true;
 
-        public Harness(InGroupSortMode inGroupSort = InGroupSortMode.RuleIndex)
+        public Harness(InGroupSortMode inGroupSort = InGroupSortMode.RuleIndex,
+            bool suppressTierPopIn = true)
         {
             var config = new ArrangeConfig(
                 new List<string> { "Critical", "Watch" },
@@ -54,6 +55,7 @@ internal static class Program
                 },
                 UnknownStatePolicy.Keep,
                 inGroupSort,
+                suppressTierPopIn,
                 new List<ReminderRule>());
             var log = new BepInEx.Logging.ManualLogSource((level, msg) => Logs.Add((level, msg)));
             var dispatcher = new ReminderDispatcher(log);
@@ -241,6 +243,20 @@ internal static class Program
     }
 
     private static string Join(IEnumerable<string> items) => string.Join(",", items);
+
+    /// <summary>v1.3.0 S13 helper: the observable spawn-animation state of a live moodle.</summary>
+    private static (float UnTransparentTime, float Scale, float Y) StateOf(Harness h, string type)
+    {
+        for (int i = 0; i < h.Manager.moodles.childCount; i++)
+        {
+            var child = h.Manager.moodles.GetChild(i);
+            var m = child?.GetComponent<Moodle>();
+            if (m == null || m.type != type) continue;
+            var rect = child.GetComponent<RectTransform>();
+            return (m.unTransparentTime, rect.localScale.x, rect.anchoredPosition.y);
+        }
+        throw new InvalidOperationException("type not found: " + type);
+    }
 
     private static void Main()
     {
@@ -904,6 +920,119 @@ internal static class Program
                 hr.Assert("S12-" + mode, "RuleIndex (legacy) order wrong",
                     Join(hr.VisualOrder()) == Join(expectedRule),
                     $"got {Join(hr.VisualOrder())} expected {Join(expectedRule)}");
+                scenarios++;
+            }
+
+            // ---------------------------------------------------------------
+            // Scenario 13 (v1.3.0): tier-change pop-in suppression. The game's pop-in
+            // trigger is "!prevMoodles.Contains(icon + intensity)" - a tier change
+            // (bleeding2 -> bleeding3) replays the full spawn animation (y+75, 2.5x
+            // scale, 0.5s fade-in), and threshold-hovering states flicker in and out
+            // with full pop-ins. SuppressTierPopIn (default on) neutralizes the replay
+            // for icon families seen within the last 2 cycles; a brand-new family
+            // still pops in; a config off-switch restores vanilla behavior exactly.
+            // Also locks the v1.3.0 watchdog fix: a dead/empty bar must leave no
+            // stale plan churning per-frame corrections.
+            // ---------------------------------------------------------------
+            {
+                // 13a: suppression ON (the shipped default). Fresh family pops in.
+                var hs = new Harness(InGroupSortMode.RuleIndex, suppressTierPopIn: true);
+                hs.Manager.CurrentStates.Add(("bleeding", 2, false, false));
+                hs.ForceRebuild();
+                hs.Frame();
+                var fresh = StateOf(hs, "bleeding2");
+                hs.Assert("S13-" + mode, "fresh family pop-in was wrongly suppressed",
+                    fresh.UnTransparentTime == 0.5f, $"unT={fresh.UnTransparentTime}");
+                hs.Assert("S13-" + mode, "fresh family pop-in scale missing",
+                    fresh.Scale > 1.5f, $"scale={fresh.Scale}");
+
+                // Tier change bleeding2 -> bleeding3: continuation, not news.
+                hs.Manager.CurrentStates.Clear();
+                hs.Manager.CurrentStates.Add(("bleeding", 3, false, false));
+                hs.ForceRebuild();
+                hs.Frame();
+                var tiered = StateOf(hs, "bleeding3");
+                hs.Assert("S13-" + mode, "tier change pop-in not suppressed",
+                    tiered.UnTransparentTime == 0f, $"unT={tiered.UnTransparentTime}");
+                hs.Assert("S13-" + mode, "tier change scale not neutralized",
+                    Mathf.Abs(tiered.Scale - 1f) < 0.01f, $"scale={tiered.Scale}");
+                hs.Assert("S13-" + mode, "tier change y not neutralized",
+                    Mathf.Abs(tiered.Y) < 0.01f, $"y={tiered.Y}");
+
+                // 13b: a one-cycle gap (threshold jitter) is still suppressed; a
+                // >=2-cycle gap expires the memory and pops in again.
+                hs.Manager.CurrentStates.Clear();  // vanish one full cycle
+                hs.ForceRebuild();
+                hs.Frame();
+                hs.Manager.CurrentStates.Add(("bleeding", 3, false, false));
+                hs.ForceRebuild();
+                hs.Frame();
+                var jitter = StateOf(hs, "bleeding3");
+                hs.Assert("S13-" + mode, "1-cycle-gap return pop-in not suppressed",
+                    jitter.UnTransparentTime == 0f, $"unT={jitter.UnTransparentTime}");
+                for (int i = 0; i < 4; i++)
+                {
+                    hs.Manager.CurrentStates.Clear();
+                    hs.ForceRebuild();
+                    hs.Frame();
+                }
+                hs.Manager.CurrentStates.Add(("bleeding", 3, false, false));
+                hs.ForceRebuild();
+                hs.Frame();
+                var longGone = StateOf(hs, "bleeding3");
+                hs.Assert("S13-" + mode, "long-gone return must pop in again (memory depth 2)",
+                    longGone.UnTransparentTime == 0.5f, $"unT={longGone.UnTransparentTime}");
+
+                // 13c: suppression OFF restores the vanilla replay exactly.
+                var ho = new Harness(InGroupSortMode.RuleIndex, suppressTierPopIn: false);
+                ho.Manager.CurrentStates.Add(("bleeding", 2, false, false));
+                ho.ForceRebuild();
+                ho.Frame();
+                ho.Manager.CurrentStates.Clear();
+                ho.Manager.CurrentStates.Add(("bleeding", 3, false, false));
+                ho.ForceRebuild();
+                ho.Frame();
+                var vanilla = StateOf(ho, "bleeding3");
+                ho.Assert("S13-" + mode, "disabled config must restore vanilla pop-in fade",
+                    vanilla.UnTransparentTime == 0.5f, $"unT={vanilla.UnTransparentTime}");
+                ho.Assert("S13-" + mode, "disabled config must restore vanilla scale",
+                    vanilla.Scale > 1.5f, $"scale={vanilla.Scale}");
+
+                // 13d: critical tier change lands ON the game's wobble sine (the L95
+                // steady-state init), not at y=0 and not at +75.
+                var hc = new Harness(InGroupSortMode.RuleIndex, suppressTierPopIn: true);
+                hc.Manager.CurrentStates.Add(("heartstop", 2, true, false));
+                hc.ForceRebuild();
+                hc.Frame();
+                hc.Manager.CurrentStates.Clear();
+                hc.Manager.CurrentStates.Add(("heartstop", 3, true, false));
+                hc.ForceRebuild();
+                hc.Frame();
+                var crit = StateOf(hc, "heartstop3");
+                var wobble = Mathf.Sin(Time.unscaledTime * 6f) * 4f;
+                hc.Assert("S13-" + mode, "critical tier change y must equal the game wobble base",
+                    Mathf.Abs(crit.Y - wobble) < 0.01f, $"y={crit.Y} wobble={wobble}");
+                hc.Assert("S13-" + mode, "critical tier change must be suppressed",
+                    crit.UnTransparentTime == 0f, $"unT={crit.UnTransparentTime}");
+
+                // 13e (v1.3.0 watchdog fix): a dead/empty bar must leave NO stale plan.
+                var he = new Harness(InGroupSortMode.RuleIndex, suppressTierPopIn: true);
+                he.Manager.CurrentStates.Add(("bleeding", 1, false, false));
+                he.ForceRebuild();
+                he.Frame();
+                he.Manager.CurrentStates.Clear();
+                he.Manager.alive = false;  // death path: AddAllMoodles early-returns
+                he.ForceRebuild();
+                he.Frame();
+                int fin0 = he.Logs.Count(l => l.Message.Contains("Watchdog finalize pass"));
+                int drift0 = he.Logs.Count(l => l.Message.Contains("child count drift"));
+                for (int i = 0; i < 10; i++) he.Frame();
+                int fin1 = he.Logs.Count(l => l.Message.Contains("Watchdog finalize pass"));
+                int drift1 = he.Logs.Count(l => l.Message.Contains("child count drift"));
+                he.Assert("S13-" + mode, "empty bar must not re-enter the watchdog finalize loop",
+                    fin1 == fin0, $"finalize before={fin0} after={fin1}");
+                he.Assert("S13-" + mode, "empty bar must not spam child-count-drift refreshes",
+                    drift1 == drift0, $"drift before={drift0} after={drift1}");
                 scenarios++;
             }
         }

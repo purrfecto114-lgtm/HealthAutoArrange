@@ -16,6 +16,9 @@ namespace HealthAutoArrange.Core
         /// <summary>v1.2.3 组内排序：默认按效果强度从高到低（用户要求）。</summary>
         public InGroupSortMode InGroupSortMode { get; set; } = InGroupSortMode.IntensityDesc;
 
+        /// <summary>v1.3.0：抑制档位变化的弹入动画重放（默认开启）。</summary>
+        public bool SuppressTierPopIn { get; set; } = true;
+
         public List<UiReminderModel> Reminders { get; } = new List<UiReminderModel>();
 
         public static UiConfigModel FromConfig(ArrangeConfig config, bool enabled)
@@ -26,7 +29,8 @@ namespace HealthAutoArrange.Core
                 Enabled = enabled,
                 GroupOrder = config.GroupOrder.ToList(),
                 UnknownStatePolicy = config.UnknownStatePolicy,
-                InGroupSortMode = config.InGroupSortMode
+                InGroupSortMode = config.InGroupSortMode,
+                SuppressTierPopIn = config.SuppressTierPopIn
             };
             foreach (var name in config.GroupOrder)
             {
@@ -57,7 +61,8 @@ namespace HealthAutoArrange.Core
                 Enabled = Enabled,
                 GroupOrder = new List<string>(GroupOrder ?? new List<string>()),
                 UnknownStatePolicy = UnknownStatePolicy,
-                InGroupSortMode = InGroupSortMode
+                InGroupSortMode = InGroupSortMode,
+                SuppressTierPopIn = SuppressTierPopIn
             };
             foreach (var group in Groups)
             {
@@ -95,6 +100,7 @@ namespace HealthAutoArrange.Core
                 groups,
                 UnknownStatePolicy,
                 InGroupSortMode,
+                SuppressTierPopIn,
                 Reminders.Select(x => new ReminderRule(
                     x.Name,
                     x.Name,
@@ -326,7 +332,8 @@ namespace HealthAutoArrange.Core
                 "Enabled = " + model.Enabled.ToString().ToLowerInvariant(),
                 "GroupOrder = " + string.Join(", ", model.GroupOrder ?? new List<string>()),
                 "UnknownStatePolicy = " + model.UnknownStatePolicy,
-                "InGroupSort = " + model.InGroupSortMode
+                "InGroupSort = " + model.InGroupSortMode,
+                "SuppressTierPopIn = " + model.SuppressTierPopIn.ToString().ToLowerInvariant()
             };
             foreach (var group in model.Groups)
                 lines.Add("Group." + (group.Name ?? string.Empty).Trim() + ".States = " + (group.StatesText ?? string.Empty).Trim());

@@ -133,6 +133,15 @@ namespace HealthAutoArrange.Plugin
         private long _ghostsHiddenCount;          // v1.2.3 diagnostics: destroy-pending icons hidden at clear time
         private long _preFadeCount;               // v1.2.3 diagnostics: creation-frame Start-color pre-applies
         private bool _watchdogPlanIncomplete;     // v1.2.3: plan built during a rebuild frame (childCount unknown)
+        private long _popInSuppressedCount;       // v1.3.0 diagnostics: tier-change pop-ins neutralized
+        // v1.3.0 tier pop-in memory: icon families seen in the current / last 2 rebuild cycles.
+        // The game's own prevMoodles compares icon+intensity, so a tier change counts as
+        // "new" and replays the full spawn animation; these sets compare the family only.
+        private HashSet<string> _cycleIconAccumulator = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private HashSet<string> _recentCycleIconsA = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private HashSet<string> _recentCycleIconsB = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private string _pendingAddIcon;           // v1.3.0: icon argument of the in-flight AddMoodle call
+        private bool _pendingAddCritical;         // v1.3.0: critical argument of the in-flight AddMoodle call
 
         // v1.2.3 render-phase flash fixes (user report: "v1.2.2 没作用，还是会闪现").
         // The v1.2.2 fixes made the mod's x-slot order authoritative within the rebuild
@@ -255,6 +264,11 @@ namespace HealthAutoArrange.Plugin
             try
             {
                 _captures.Capture(manager, intensity, icon, name, desc, critical, chippedOnly, manager.sideMoodles);
+                // v1.3.0: stash the raw icon family + critical flag for the postfix's
+                // pop-in suppression decision (moodle.type = icon + intensity, so the
+                // icon argument alone identifies the family across tier changes).
+                _pendingAddIcon = icon ?? string.Empty;
+                _pendingAddCritical = critical;
                 // v1.2.2: stash the expected post-conditions of THIS call so the postfix can
                 // detect the no-op path (AddMoodle returns without creating a child when
                 // chippedOnly && WorldGeneration.unchipped). The game sets moodle.type =
@@ -311,6 +325,11 @@ namespace HealthAutoArrange.Plugin
                 var newChild = moodles.GetChild(lastIdx);
                 if (newChild == null) { ClearPendingAdd(); return; }  // already destroyed by another Mod
 
+                // v1.3.0: capture the prefix stash BEFORE ClearPendingAdd() wipes it
+                // (the pop-in suppression decision below needs the raw icon family).
+                string pendingIcon = _pendingAddIcon;
+                bool pendingCritical = _pendingAddCritical;
+
                 // v1.2.2: validate that AddMoodle actually created a child on THIS call.
                 // AddMoodle no-ops when chippedOnly && WorldGeneration.unchipped; the last
                 // child is then a leftover from a previous call (possibly a destroy-pending
@@ -365,6 +384,24 @@ namespace HealthAutoArrange.Plugin
                 // list must never be used to write slots (it could overlap pre-existing
                 // moodles that are not part of the cycle).
                 var createdMoodle = newChild.GetComponent<Moodle>();
+
+                // v1.3.0: tier-change pop-in suppression. The game replays the full spawn
+                // animation whenever moodle.type (= icon + intensity) is absent from the
+                // previous cycle's types, so pain1->pain2 pops in like a brand-new state
+                // and threshold-hovering states flicker in and out with full pop-ins.
+                // When the icon family was on screen within the last 2 cycles this is a
+                // continuation, not news: neutralize the animation to the game's own
+                // steady-state init (decomp L91/L95 equivalents). True new states keep it.
+                if (!string.IsNullOrEmpty(pendingIcon))
+                {
+                    _cycleIconAccumulator.Add(pendingIcon);
+                    if (_runtime.Enabled
+                        && _config.SuppressTierPopIn
+                        && (_recentCycleIconsA.Contains(pendingIcon) || _recentCycleIconsB.Contains(pendingIcon)))
+                    {
+                        SuppressPopIn(newChild, createdMoodle, pendingCritical);
+                    }
+                }
 
                 // v1.2.3 render-phase fix (b): replicate Moodle.Start()'s color
                 // initialization NOW (the creation frame) instead of one frame later.
@@ -428,6 +465,36 @@ namespace HealthAutoArrange.Plugin
         }
 
         /// <summary>
+        /// v1.3.0: neutralize the game's spawn animation for a continuation state (tier
+        /// change or short-gap return). Writes exactly the values the game itself uses
+        /// when creating an EXISTING state (decomp MoodleManager.AddMoodle L91/L95 plus
+        /// the absence of the pop-in branch L126-131): scale one, y = critical sway
+        /// formula, unTransparentTime 0. The subsequent pre-fade then computes alpha 1
+        /// (steady), and creation-time positioning writes x only (y is preserved).
+        /// </summary>
+        private void SuppressPopIn(Transform newChild, Moodle moodle, bool critical)
+        {
+            try
+            {
+                if (newChild == null || moodle == null) return;
+                var rect = newChild as RectTransform ?? newChild.GetComponent<RectTransform>();
+                if (rect != null)
+                {
+                    rect.localScale = Vector3.one;
+                    rect.anchoredPosition = new Vector2(
+                        rect.anchoredPosition.x,
+                        critical ? Mathf.Sin(Time.unscaledTime * 6f) * 4f : 0f);
+                }
+                moodle.unTransparentTime = 0f;
+                _popInSuppressedCount++;
+            }
+            catch (Exception ex)
+            {
+                LogThrottled($"Pop-in suppress failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
         /// v1.2.2: ClearMoodles postfix callback. ClearMoodles runs at the START of every
         /// rebuild cycle: old nodes are destroy-pending (Object.Destroy removes them at the
         /// end of the frame) and new nodes do not exist yet. Reset the per-cycle
@@ -457,6 +524,15 @@ namespace HealthAutoArrange.Plugin
 
                 _cycleMembers.Clear();
                 _cycleManagerKey = 0;
+                // v1.3.0: cycle delimiter for the tier pop-in memory. The just-finished
+                // cycle's accumulated icon families become "one cycle ago"; a depth of 2
+                // also bridges single-cycle gaps (threshold jitter: a state hovering at a
+                // tier boundary can vanish for one rebuild and return the next).
+                var finishedCycleIcons = _recentCycleIconsB;
+                _recentCycleIconsB = _recentCycleIconsA;
+                _recentCycleIconsA = _cycleIconAccumulator;
+                finishedCycleIcons.Clear();
+                _cycleIconAccumulator = finishedCycleIcons;
                 ClearFreshInstanceSet();
                 InvalidateWatchdog();
 
@@ -519,6 +595,8 @@ namespace HealthAutoArrange.Plugin
             _pendingAddManagerKey = 0;
             _pendingAddExpectedType = null;
             _pendingAddChildCountBefore = -1;
+            _pendingAddIcon = null;
+            _pendingAddCritical = false;
         }
 
         /// <summary>
@@ -968,7 +1046,16 @@ namespace HealthAutoArrange.Plugin
             }
             _nextReminderTickRealtime = Time.realtimeSinceStartup + ReminderTickSeconds;
 
-            if (!_runtime.Enabled || visuals.Count < 1) return;
+            if (visuals.Count < 1 || !_runtime.Enabled)
+            {
+                // v1.3.0: no sort pass runs from here, so any existing watchdog plan
+                // would go stale against the game's ongoing 0.5s rebuilds (the empty-bar
+                // path with a degraded Clear patch even re-entered the finalize pass
+                // every frame). Drop the plan; the next enabled sort pass (rebuild
+                // boundary, 4 Hz net, or ForceResort) rebuilds it.
+                InvalidateWatchdog();
+                return;
+            }
 
             try
             {
@@ -1069,7 +1156,7 @@ namespace HealthAutoArrange.Plugin
                 }
 
                 _log?.Invoke(LogLevel.Info, $"Pending=False, Manager={(_manager != null ? _manager.name : "null")}");
-                _log?.Invoke(LogLevel.Info, $"stats: AddMoodlePostfix={_addMoodlePostfixCount}, PeriodicResort={_periodicResortCount}, SiblingFallback={_siblingSortFallbackCount}, AnchoredWrite={_anchoredSortWriteCount}, MoodlesCleared={_moodlesClearedCount}, CreationTimePosition={_creationTimePositionCount}, GhostsHidden={_ghostsHiddenCount}, PreFade={_preFadeCount}, WatchdogFinalize(expected)={_watchdogFinalizeCount}, WatchdogCorrection(unexpected)={_watchdogCorrectionCount}, FreshSetSize={(_freshManagerKey != 0 && _freshInstanceIdsByManager.TryGetValue(_freshManagerKey, out var fs) ? fs.Count : 0)}");
+                _log?.Invoke(LogLevel.Info, $"stats: AddMoodlePostfix={_addMoodlePostfixCount}, PeriodicResort={_periodicResortCount}, SiblingFallback={_siblingSortFallbackCount}, AnchoredWrite={_anchoredSortWriteCount}, MoodlesCleared={_moodlesClearedCount}, CreationTimePosition={_creationTimePositionCount}, GhostsHidden={_ghostsHiddenCount}, PreFade={_preFadeCount}, PopInSuppressed={_popInSuppressedCount}, WatchdogFinalize(expected)={_watchdogFinalizeCount}, WatchdogCorrection(unexpected)={_watchdogCorrectionCount}, FreshSetSize={(_freshManagerKey != 0 && _freshInstanceIdsByManager.TryGetValue(_freshManagerKey, out var fs) ? fs.Count : 0)}");
                 _log?.Invoke(LogLevel.Info, $"frame: Frame={Time.frameCount}, LastClearFrame={_lastClearFrame}, LastFinalizeFrame={_lastFinalizeFrame}, WatchdogPlanSize={_watchdogRects.Count}, WatchdogPlan={(_watchdogRects.Count == 0 ? "none" : (_watchdogPlanIncomplete ? "incomplete-pending-finalize" : "complete"))}");
                 _log?.Invoke(LogLevel.Info, $"sort: Enabled={_runtime.Enabled}, InGroup={DescribeInGroupSort(_config)}, UnknownPolicy={(_config != null ? _config.UnknownStatePolicy.ToString() : "unknown")}");
                 if (_manager != null)

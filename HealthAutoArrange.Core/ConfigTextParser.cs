@@ -39,6 +39,8 @@ namespace HealthAutoArrange.Core
             var policy = UnknownStatePolicy.Keep;
             // v1.2.3: missing key => IntensityDesc (同组内按效果强度从高到低, 用户要求的默认).
             var inGroupSort = InGroupSortMode.IntensityDesc;
+            // v1.3.0: missing key => true（档位变化弹入抑制默认开启）.
+            var suppressTierPopIn = true;
             var rules = new Dictionary<string, RuleBuilder>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var rawLine in text.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.None))
@@ -90,6 +92,13 @@ namespace HealthAutoArrange.Core
                         inGroupSort = parsedSort;
                     else
                         warnings.Add($"InGroupSort: invalid value '{value}', using IntensityDesc. Valid: RuleIndex, IntensityDesc, IntensityAsc.");
+                }
+                else if (string.Equals(key, "SuppressTierPopIn", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (bool.TryParse(value, out bool parsedSuppress))
+                        suppressTierPopIn = parsedSuppress;
+                    else
+                        warnings.Add($"SuppressTierPopIn: invalid value '{value}', using true.");
                 }
                 else if (key.StartsWith(ReminderPrefix, StringComparison.OrdinalIgnoreCase))
                 {
@@ -157,6 +166,7 @@ namespace HealthAutoArrange.Core
                     StringComparer.OrdinalIgnoreCase),
                 policy,
                 inGroupSort,
+                suppressTierPopIn,
                 reminders);
 
             return new ConfigParseResult(config, warnings);

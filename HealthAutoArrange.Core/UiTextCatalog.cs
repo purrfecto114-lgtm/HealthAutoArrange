@@ -21,6 +21,11 @@ namespace HealthAutoArrange.Core
         public string Advanced => _chinese ? "高级设置" : "Advanced";
         public string ReminderRules => _chinese ? "状态提醒（实验性）" : "State reminders (experimental)";
         public string TechnicalEditing => _chinese ? "手动编辑状态 ID" : "Edit state IDs manually";
+        public string RulesWindowTitle => _chinese ? "排序规则" : "Sort rules";
+        public string RemindersWindowTitle => _chinese ? "状态提醒" : "State reminders";
+        public string UpdatesWindowTitle => _chinese ? "版本与工具" : "Version & tools";
+        public string WindowsHeader => _chinese ? "窗口" : "Windows";
+        public string SuppressTierPopIn => _chinese ? "抑制档位变化的弹入动画" : "Suppress tier-change pop-in";
         public string Name => _chinese ? "名称" : "Name";
         public string States => _chinese ? "状态 ID / 模式" : "State IDs / patterns";
         public string Mode => _chinese ? "输出方式" : "Output";
@@ -127,6 +132,12 @@ namespace HealthAutoArrange.Core
             ? "这里列出的不是 Wiki 推测值，而是本 Mod 实际在 UI 中观察到的 Moodle。不同强度通常归并为同一基础状态；游戏条件、脑芯片、健康面板/悬停会影响哪些状态能出现。"
             : "This catalog is built from Moodle UI nodes actually observed at runtime, not guessed wiki variables. Severity variants are normally merged; game conditions, brainchip state, health-panel state and hovering affect what can appear.";
 
+        public string WindowsHelp => _chinese
+            ? "排序分组、状态目录、提醒与版本工具已拆分为独立窗口：可分别打开、拖动、关闭；保存与重载始终在主窗口。"
+            : "Groups, the state catalog, reminders and version tools live in their own windows now; open, drag and close them independently. Save / reload stay in the main window.";
+        public string SuppressTierPopInHelp => _chinese
+            ? "游戏把强度档位变化（如 pain1→pain2）当作全新状态，重放完整出生动画（2.5 倍放大、上移 75px、淡入）；阈值抖动时会反复闪现。开启后：同一状态族在最近 2 个周期内出现过即视为延续，原位切换不再弹入；真正的新状态仍播放动画。"
+            : "The game treats an intensity tier change (pain1->pain2) as a brand-new state and replays the full spawn animation (2.5x scale, +75px drop, fade-in); threshold-hovering states flicker repeatedly. On: a state family seen within the last 2 cycles swaps in place without the pop-in; genuinely new states still animate.";
         public string AdvancedHelp => _chinese
             ? "高级区主要用于诊断、兼容和提醒。排序本身通常不需要改这里；越多自定义坐标/提醒规则，越容易受分辨率和游戏更新影响。"
             : "Advanced options are mostly for diagnostics, compatibility and reminders. Sorting normally needs none of these; custom positions/reminders are more sensitive to resolution and game updates.";

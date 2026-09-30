@@ -19,7 +19,7 @@ namespace HealthAutoArrange.Plugin
     /// 单个可选补丁目标缺失时降级并记录；运行期可捕获的托管异常尽量隔离。
     /// 不宣称能够吞掉 Unity 原生层故障，也不把 ABI/依赖不匹配伪装成“安全可继续”。
     /// </summary>
-    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.2.3")]
+    [BepInPlugin("com.healthautoarrange.plugin", "Health Auto Arrange", "1.3.0")]
     public class Plugin : BaseUnityPlugin,
         IFallbackSettingsActions,
         IFallbackSettingsStateActions,
@@ -32,7 +32,7 @@ namespace HealthAutoArrange.Plugin
         internal static UnityUiAdapter Adapter;
 
         /// <summary>F8 设置窗口是否打开（供输入拦截补丁查询）。</summary>
-        internal static bool SettingsWindowOpen => SettingsWindow != null && SettingsWindow.IsOpen;
+        internal static bool SettingsWindowOpen => SettingsWindow != null && SettingsWindow.AnyOpen;
 
         private const string RulesFileName = "com.healthautoarrange.plugin.rules.cfg";
 
@@ -131,7 +131,7 @@ namespace HealthAutoArrange.Plugin
             Logger.LogInfo($"Rules file: {_rulesPath}");
             _uiModel = LoadRulesModel(parseResult.Config);
             ApplyModel(_uiModel);
-            Logger.LogInfo($"In-group ordering: {UnityUiAdapter.DescribeInGroupSort(parseResult.Config)} [InGroupSort={parseResult.Config.InGroupSortMode}].");
+            Logger.LogInfo($"In-group ordering: {UnityUiAdapter.DescribeInGroupSort(_uiModel.ToConfig())} [InGroupSort={_uiModel.InGroupSortMode}, SuppressTierPopIn={_uiModel.SuppressTierPopIn}].");
 
             // 5. 启动更新检查：仅从 GitHub 读取签名清单并提醒，不下载或安装文件。
             _updater = new SafeUpdater(
@@ -427,7 +427,7 @@ namespace HealthAutoArrange.Plugin
             try
             {
                 if (SettingsWindow == null) return;
-                if (SettingsWindow.IsOpen) SettingsWindow.Close();
+                if (SettingsWindow.AnyOpen) SettingsWindow.Close();
                 else SettingsWindow.Open();
             }
             catch (Exception ex)
@@ -836,6 +836,8 @@ namespace HealthAutoArrange.Plugin
                 "Unknown state policy: Keep (recommended; preserve position) or End (move unknown states to end).");
             Config.Bind("General", "InGroupSort", "IntensityDesc",
                 "v1.2.3: in-group ordering. IntensityDesc = order by current effect strength, strongest first (default); IntensityAsc = weakest first; RuleIndex = order states as declared per group. Rules-file key: InGroupSort.");
+            Config.Bind("General", "SuppressTierPopIn", true,
+                "v1.3.0: neutralize the spawn pop-in replay when only the intensity tier changed (e.g. pain1->pain2) or a state briefly vanished across a threshold; brand-new states still play the animation. Rules-file key: SuppressTierPopIn.");
             Config.Bind("Groups", "Group.Priority 1.States", string.Empty,
                 "Highest-priority observed Moodle patterns. Prefer assigning them from the in-game state catalog.");
             Config.Bind("Groups", "Group.Priority 2.States", string.Empty,

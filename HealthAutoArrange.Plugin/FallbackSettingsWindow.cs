@@ -69,17 +69,15 @@ namespace HealthAutoArrange.Plugin
     /// </summary>
     public sealed class FallbackSettingsWindow
     {
-        private const int WindowId = 187431;
-        private const float DesignHeight = 1080f;
-        private const float MinWindowWidth = 460f;
-        private const float MinWindowHeight = 380f;
-        private const float MaxWindowWidthRatio = 0.70f;
-        private const float MaxWindowHeightRatio = 0.80f;
+        // v1.3.0 multi-window layout: one compact main window (basic settings, window
+        // launchers, save/reload) plus three focused sub-windows (rules with tabs,
+        // reminders, version & tools). All panes share the same DPI scale pipeline
+        // (Screen.height / 1080, 1x-2x) and per-frame rect clamping.
+        private const int MainWindowId = 187431;
+        private const int RulesWindowId = 187432;
+        private const int RemindersWindowId = 187433;
+        private const int UpdatesWindowId = 187434;
         private readonly IFallbackSettingsActions _actions;
-        private Vector2 _scroll;
-        private Rect _windowRect = new Rect(80f, 80f, 640f, 560f);
-        private bool _open;
-        private bool _hasOpened;
         private UiConfigModel _model;
         private UiTextCatalog _text;
         private IReadOnlyList<StateCatalogEntry> _stateCatalog;
@@ -87,13 +85,47 @@ namespace HealthAutoArrange.Plugin
         private string _stateSearch = string.Empty;
         private int _stateFilter;
         private int _targetGroupIndex;
-        private bool _advancedTextEditing;
-        private bool _showAdvanced;
-        private bool _showReminders;
-        private bool _showUpdates;
         private bool _dirty;
         private PendingDestructiveAction _pendingDestructiveAction;
         private string _stateMessage = string.Empty;
+        private WindowPane _currentPane;  // pane whose delegate is drawing right now
+        private readonly List<WindowPane> _drawOrderCache = new List<WindowPane>(4);
+
+        internal enum WindowKind { Main, Rules, Reminders, Updates }
+
+        /// <summary>Per-window state bag: rect, scroll, open flag and rules tab index.</summary>
+        private sealed class WindowPane
+        {
+            public readonly WindowKind Kind;
+            public readonly int Id;
+            public readonly float MinWidth, MinHeight, MaxWidthRatio, MaxHeightRatio;
+            public Rect Rect;
+            public Vector2 Scroll;
+            public bool Open;
+            public bool HasOpened;
+            public int Tab;
+            public WindowPane(WindowKind kind, int id, Rect initialRect,
+                float minWidth, float minHeight, float maxWidthRatio, float maxHeightRatio)
+            {
+                Kind = kind;
+                Id = id;
+                Rect = initialRect;
+                MinWidth = minWidth;
+                MinHeight = minHeight;
+                MaxWidthRatio = maxWidthRatio;
+                MaxHeightRatio = maxHeightRatio;
+            }
+        }
+
+        private readonly WindowPane _mainPane = new WindowPane(
+            WindowKind.Main, MainWindowId, new Rect(80f, 80f, 640f, 560f), 460f, 380f, 0.70f, 0.80f);
+        private readonly WindowPane _rulesPane = new WindowPane(
+            WindowKind.Rules, RulesWindowId, new Rect(150f, 120f, 560f, 520f), 460f, 380f, 0.70f, 0.80f);
+        private readonly WindowPane _remindersPane = new WindowPane(
+            WindowKind.Reminders, RemindersWindowId, new Rect(210f, 160f, 520f, 560f), 440f, 360f, 0.60f, 0.80f);
+        private readonly WindowPane _updatesPane = new WindowPane(
+            WindowKind.Updates, UpdatesWindowId, new Rect(260f, 200f, 460f, 360f), 360f, 240f, 0.50f, 0.60f);
+        private WindowKind _lastActiveWindow = WindowKind.Main;
 
         private enum PendingDestructiveAction
         {
@@ -139,7 +171,9 @@ namespace HealthAutoArrange.Plugin
             _selectionEditor = _model.CreateSelectionEditor();
         }
 
-        public bool IsOpen => _open;
+        public bool IsOpen => _mainPane.Open;
+        /// <summary>Any of the four windows is open (input interception / badge move).</summary>
+        public bool AnyOpen => _mainPane.Open || _rulesPane.Open || _remindersPane.Open || _updatesPane.Open;
         public UiConfigModel Model => _model;
 
         /// <summary>
@@ -159,10 +193,11 @@ namespace HealthAutoArrange.Plugin
 
         public void Open()
         {
-            _open = true;
-            _scroll = Vector2.zero;
-            ConfigureWindowRect(!_hasOpened);
-            _hasOpened = true;
+            _mainPane.Open = true;
+            _mainPane.Scroll = Vector2.zero;
+            ConfigurePaneRect(_mainPane, !_mainPane.HasOpened, 0f);
+            _mainPane.HasOpened = true;
+            _lastActiveWindow = WindowKind.Main;
             RefreshCatalog();
         }
 
@@ -194,7 +229,7 @@ namespace HealthAutoArrange.Plugin
 
         public void Close()
         {
-            if (!_open) return;
+            if (!AnyOpen) return;
             if (_dirty)
             {
                 _pendingDestructiveAction = PendingDestructiveAction.Close;
@@ -206,18 +241,26 @@ namespace HealthAutoArrange.Plugin
         private void CloseImmediately()
         {
             _pendingDestructiveAction = PendingDestructiveAction.None;
-            _open = false;
+            _mainPane.Open = false;
+            _rulesPane.Open = false;
+            _remindersPane.Open = false;
+            _updatesPane.Open = false;
+            _lastActiveWindow = WindowKind.Main;
             _actions.Close();
         }
 
         /// <summary>在 OnGUI 中调用；返回后由调用方决定是否继续绘制其它 UI。</summary>
         public void Draw()
         {
-            if (!_open) return;
+            if (!AnyOpen) return;
             if (Event.current != null && Event.current.type == EventType.KeyDown
                 && Event.current.keyCode == KeyCode.Escape)
             {
-                Close();
+                // Esc routes to the ACTIVE window: sub-windows close instantly (edits
+                // live in the shared model, so nothing is lost); the main window keeps
+                // the historical dirty-confirm semantics (F8 toggle unchanged).
+                if (_lastActiveWindow == WindowKind.Main) Close();
+                else ClosePane(_lastActiveWindow);
                 Event.current.Use();
                 return;
             }
@@ -226,9 +269,23 @@ namespace HealthAutoArrange.Plugin
             var scale = CalculateScale(Screen.height);
             try
             {
-                ConfigureWindowRect(false, scale);
                 GUI.matrix = previousMatrix * Matrix4x4.Scale(new Vector3(scale, scale, 1f));
-                _windowRect = GUI.Window(WindowId, _windowRect, DrawWindow, _text.WindowTitle);
+                // Fixed z-order with the ACTIVE window drawn LAST (visually on top).
+                _drawOrderCache.Clear();
+                if (_mainPane.Open) _drawOrderCache.Add(_mainPane);
+                if (_rulesPane.Open) _drawOrderCache.Add(_rulesPane);
+                if (_remindersPane.Open) _drawOrderCache.Add(_remindersPane);
+                if (_updatesPane.Open) _drawOrderCache.Add(_updatesPane);
+                if (_lastActiveWindow != WindowKind.Main)
+                {
+                    var active = PaneFor(_lastActiveWindow);
+                    if (_drawOrderCache.Remove(active)) _drawOrderCache.Add(active);
+                }
+                for (int i = 0; i < _drawOrderCache.Count; i++)
+                {
+                    DrawPaneWindow(_drawOrderCache[i], scale);
+                }
+                DrawTooltipOverlay(_drawOrderCache);
             }
             finally
             {
@@ -236,9 +293,102 @@ namespace HealthAutoArrange.Plugin
             }
         }
 
-        private void DrawWindow(int id)
+        private void DrawPaneWindow(WindowPane pane, float scale)
+        {
+            ConfigurePaneRect(pane, false, scale);
+            var previousPane = _currentPane;
+            _currentPane = pane;
+            try
+            {
+                pane.Rect = GUI.Window(pane.Id, pane.Rect, id => DrawPane(pane), TitleFor(pane.Kind));
+            }
+            finally
+            {
+                _currentPane = previousPane;
+            }
+        }
+
+        private string TitleFor(WindowKind kind)
+        {
+            switch (kind)
+            {
+                case WindowKind.Rules: return _text.RulesWindowTitle;
+                case WindowKind.Reminders: return _text.RemindersWindowTitle;
+                case WindowKind.Updates: return _text.UpdatesWindowTitle;
+                default: return _text.WindowTitle;
+            }
+        }
+
+        private void DrawPane(WindowPane pane)
+        {
+            if (Event.current != null && Event.current.type == EventType.MouseDown)
+            {
+                _lastActiveWindow = pane.Kind;
+                GUI.BringWindowToFront(pane.Id);
+            }
+            switch (pane.Kind)
+            {
+                case WindowKind.Rules: DrawRulesWindow(pane); break;
+                case WindowKind.Reminders: DrawRemindersWindow(pane); break;
+                case WindowKind.Updates: DrawUpdatesWindow(pane); break;
+                default: DrawMainWindow(pane); break;
+            }
+            GUI.DragWindow(new Rect(0f, 0f, 10000f, 24f));
+        }
+
+        private void DrawMainWindow(WindowPane pane)
         {
             GUILayout.BeginVertical();
+            DrawHeaderRow();
+
+            pane.Scroll = GUILayout.BeginScrollView(pane.Scroll, GUILayout.ExpandHeight(true));
+
+            DrawSectionHeader(_text.Basic, _text.EnabledHelp);
+            DrawEnabledToggle();
+
+            DrawSectionHeader(_text.UnknownStatePolicy, _text.UnknownPolicyHelp);
+            var policy = DrawPolicy(_model.UnknownStatePolicy, _text);
+            if (policy != _model.UnknownStatePolicy) { _model.UnknownStatePolicy = policy; _dirty = true; }
+            if (_model.UnknownStatePolicy == UnknownStatePolicy.End)
+                GUILayout.Label(_text.UnknownMovedNote);
+
+            GUILayout.Space(6f);
+            // v1.2.3: 同组内排序（效果强度降/升序 或 规则顺序）。
+            DrawSectionHeader(_text.InGroupSort, _text.InGroupSortHelp);
+            var inGroup = DrawInGroupSort(_model.InGroupSortMode, _text);
+            if (inGroup != _model.InGroupSortMode) { _model.InGroupSortMode = inGroup; _dirty = true; }
+
+            // v1.3.0: 档位变化弹入抑制。
+            GUILayout.Space(6f);
+            GUILayout.BeginHorizontal();
+            var prevSuppress = _model.SuppressTierPopIn;
+            var suppress = GUILayout.Toggle(prevSuppress, _text.SuppressTierPopIn, GUILayout.Height(26f));
+            DrawInfoButton(_text.SuppressTierPopInHelp);
+            GUILayout.EndHorizontal();
+            if (suppress != prevSuppress) { _model.SuppressTierPopIn = suppress; _dirty = true; }
+
+            GUILayout.Space(10f);
+            DrawWindowLaunchers();
+
+            GUILayout.EndScrollView();
+            GUILayout.Space(6f);
+            if (!string.IsNullOrEmpty(_stateMessage)) GUILayout.Label(_stateMessage);
+            if (_dirty) GUILayout.Label("• " + _text.Unsaved);
+            DrawPendingDestructivePrompt();
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(_text.Save, GUILayout.Width(IsNarrowLayout() ? 108f : 132f), GUILayout.Height(32f))) SaveChanges();
+            if (GUILayout.Button(_text.Reload, GUILayout.Width(IsNarrowLayout() ? 118f : 148f), GUILayout.Height(32f)))
+            {
+                if (_dirty) _pendingDestructiveAction = PendingDestructiveAction.Reload;
+                else ReloadFromDisk();
+            }
+            if (GUILayout.Button(_text.Close, GUILayout.Width(88f), GUILayout.Height(32f))) Close();
+            GUILayout.EndHorizontal();
+            GUILayout.EndVertical();
+        }
+
+        private void DrawHeaderRow()
+        {
             GUILayout.BeginHorizontal();
             var updateActions = _actions as IFallbackSettingsUpdateActions;
             var headerUpdate = updateActions?.GetUpdateStatus();
@@ -246,16 +396,17 @@ namespace HealthAutoArrange.Plugin
             if (headerUpdate != null && headerUpdate.HasUpdate && !string.IsNullOrWhiteSpace(headerUpdate.LatestVersion))
             {
                 if (GUILayout.Button(_text.UpdateBadge(headerUpdate.LatestVersion), GUILayout.Width(IsNarrowLayout() ? 108f : 126f), GUILayout.Height(26f)))
-                    _showUpdates = true;
+                    OpenPane(WindowKind.Updates);
             }
             if (GUILayout.Button(new GUIContent(_text.LanguageButton, _text.LanguageHelp), GUILayout.Width(76f), GUILayout.Height(26f)))
             {
                 SetLanguage(!_text.IsChinese);
             }
             GUILayout.EndHorizontal();
-            _scroll = GUILayout.BeginScrollView(_scroll, GUILayout.ExpandHeight(true));
+        }
 
-            DrawSectionHeader(_text.Basic, _text.EnabledHelp);
+        private void DrawEnabledToggle()
+        {
             var prevEnabled = _model.Enabled;
             var enabled = GUILayout.Toggle(prevEnabled, _text.Enabled, GUILayout.Height(26f));
             if (enabled != prevEnabled)
@@ -305,77 +456,111 @@ namespace HealthAutoArrange.Plugin
                     catch (Exception ex) { _dirty = true; _stateMessage = _text.SaveFailed + ex.Message; }
                 }
             }
+        }
 
-            DrawSectionHeader(_text.UnknownStatePolicy, _text.UnknownPolicyHelp);
-            var policy = DrawPolicy(_model.UnknownStatePolicy, _text);
-            if (policy != _model.UnknownStatePolicy) { _model.UnknownStatePolicy = policy; _dirty = true; }
-            if (_model.UnknownStatePolicy == UnknownStatePolicy.End)
-                GUILayout.Label(_text.UnknownMovedNote);
-
-            GUILayout.Space(6f);
-            // v1.2.3: 同组内排序（效果强度降/升序 或 规则顺序）。
-            DrawSectionHeader(_text.InGroupSort, _text.InGroupSortHelp);
-            var inGroup = DrawInGroupSort(_model.InGroupSortMode, _text);
-            if (inGroup != _model.InGroupSortMode) { _model.InGroupSortMode = inGroup; _dirty = true; }
-
-            GUILayout.Space(10f);
-            DrawSectionHeader(_text.Groups, _text.GroupHelp);
-            DrawGroups();
-
-            DrawStateSelection();
-
-            GUILayout.Space(10f);
-            if (GUILayout.Button((_showAdvanced ? "▼ " : "▶ ") + _text.Advanced, GUILayout.Height(30f)))
-                _showAdvanced = !_showAdvanced;
-            if (_showAdvanced)
-            {
-                DrawSectionHeader(_text.Advanced, _text.AdvancedHelp);
-                _advancedTextEditing = GUILayout.Toggle(_advancedTextEditing, _text.TechnicalEditing, GUILayout.Height(24f));
-
-                if (_advancedTextEditing)
-                {
-                    GUILayout.Space(4f);
-                    DrawAdvancedGroupTextEditor();
-                }
-
-                GUILayout.BeginHorizontal();
-                if (GUILayout.Button(_text.ForceResort, GUILayout.Width(126f), GUILayout.Height(30f))) _actions.ForceResort();
-                if (GUILayout.Button(_text.Diagnostics, GUILayout.Width(126f), GUILayout.Height(30f))) _actions.DumpDiagnostics();
-                GUILayout.EndHorizontal();
-
-                GUILayout.Space(6f);
-                if (GUILayout.Button((_showReminders ? "▼ " : "▶ ") + _text.ReminderRules, GUILayout.Height(30f)))
-                    _showReminders = !_showReminders;
-                if (_showReminders)
-                {
-                    DrawSectionHeader(_text.ReminderRules, _text.ReminderHelp);
-                    DrawReminders();
-                }
-            }
-
-            GUILayout.Space(10f);
-            if (GUILayout.Button((_showUpdates ? "▼ " : "▶ ") + _text.Updates, GUILayout.Height(30f)))
-                _showUpdates = !_showUpdates;
-            if (_showUpdates) DrawUpdates();
-
-            GUILayout.EndScrollView();
-            GUILayout.Space(6f);
-            if (!string.IsNullOrEmpty(_stateMessage)) GUILayout.Label(_stateMessage);
-            if (_dirty) GUILayout.Label("• " + _text.Unsaved);
-            DrawPendingDestructivePrompt();
+        private void DrawWindowLaunchers()
+        {
+            DrawSectionHeader(_text.WindowsHeader, _text.WindowsHelp);
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button(_text.Save, GUILayout.Width(IsNarrowLayout() ? 108f : 132f), GUILayout.Height(32f))) SaveChanges();
-            if (GUILayout.Button(_text.Reload, GUILayout.Width(IsNarrowLayout() ? 118f : 148f), GUILayout.Height(32f)))
-            {
-                if (_dirty) _pendingDestructiveAction = PendingDestructiveAction.Reload;
-                else ReloadFromDisk();
-            }
-            if (GUILayout.Button(_text.Close, GUILayout.Width(88f), GUILayout.Height(32f))) Close();
+            LauncherButton(WindowKind.Rules, _text.RulesWindowTitle);
+            LauncherButton(WindowKind.Reminders, _text.RemindersWindowTitle);
+            LauncherButton(WindowKind.Updates, _text.UpdatesWindowTitle);
             GUILayout.EndHorizontal();
-            GUILayout.EndVertical();
+        }
 
-            DrawTooltipOverlay();
-            GUI.DragWindow(new Rect(0f, 0f, 10000f, 24f));
+        private void LauncherButton(WindowKind kind, string label)
+        {
+            var pane = PaneFor(kind);
+            var marker = pane.Open ? " \u2713" : string.Empty;
+            if (GUILayout.Button(label + marker, GUILayout.Height(30f)))
+            {
+                if (pane.Open) ClosePane(kind);
+                else OpenPane(kind);
+            }
+        }
+
+        internal void OpenPane(WindowKind kind)
+        {
+            var pane = PaneFor(kind);
+            if (pane.Open) return;
+            pane.Open = true;
+            pane.HasOpened = true;
+            pane.Scroll = Vector2.zero;
+            // Cascade from the main window so the new pane never covers its header.
+            var anchor = _mainPane.Rect;
+            pane.Rect = new Rect(anchor.x + 28f, anchor.y + 28f, pane.Rect.width, pane.Rect.height);
+            ConfigurePaneRect(pane, false, 0f);
+            _lastActiveWindow = kind;
+            GUI.BringWindowToFront(pane.Id);
+        }
+
+        private void ClosePane(WindowKind kind)
+        {
+            var pane = PaneFor(kind);
+            pane.Open = false;
+            if (_lastActiveWindow == kind) _lastActiveWindow = WindowKind.Main;
+        }
+
+        private WindowPane PaneFor(WindowKind kind)
+        {
+            switch (kind)
+            {
+                case WindowKind.Rules: return _rulesPane;
+                case WindowKind.Reminders: return _remindersPane;
+                case WindowKind.Updates: return _updatesPane;
+                default: return _mainPane;
+            }
+        }
+
+        private void DrawRulesWindow(WindowPane pane)
+        {
+            GUILayout.BeginVertical();
+            // v1.3.0 multi-page: the rules window packs three focused pages.
+            var tabs = new[] { _text.Groups, _text.StateSelection, _text.TechnicalEditing };
+            if (pane.Tab < 0 || pane.Tab >= tabs.Length) pane.Tab = 0;
+            pane.Tab = GUILayout.Toolbar(pane.Tab, tabs);
+            GUILayout.Space(6f);
+            pane.Scroll = GUILayout.BeginScrollView(pane.Scroll, GUILayout.ExpandHeight(true));
+            switch (pane.Tab)
+            {
+                case 0:
+                    DrawSectionHeader(_text.Groups, _text.GroupHelp);
+                    DrawGroups();
+                    break;
+                case 1:
+                    DrawStateSelection();
+                    break;
+                default:
+                    DrawSectionHeader(_text.TechnicalEditing, _text.AdvancedHelp);
+                    DrawAdvancedGroupTextEditor();
+                    break;
+            }
+            GUILayout.EndScrollView();
+            GUILayout.EndVertical();
+        }
+
+        private void DrawRemindersWindow(WindowPane pane)
+        {
+            GUILayout.BeginVertical();
+            DrawSectionHeader(_text.ReminderRules, _text.ReminderHelp);
+            pane.Scroll = GUILayout.BeginScrollView(pane.Scroll, GUILayout.ExpandHeight(true));
+            DrawReminders();
+            GUILayout.EndScrollView();
+            GUILayout.EndVertical();
+        }
+
+        private void DrawUpdatesWindow(WindowPane pane)
+        {
+            GUILayout.BeginVertical();
+            pane.Scroll = GUILayout.BeginScrollView(pane.Scroll, GUILayout.ExpandHeight(true));
+            DrawUpdates();
+            GUILayout.Space(10f);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(_text.ForceResort, GUILayout.Height(30f))) _actions.ForceResort();
+            if (GUILayout.Button(_text.Diagnostics, GUILayout.Height(30f))) _actions.DumpDiagnostics();
+            GUILayout.EndHorizontal();
+            GUILayout.EndScrollView();
+            GUILayout.EndVertical();
         }
 
         private void SaveChanges()
@@ -1188,55 +1373,58 @@ namespace HealthAutoArrange.Plugin
             GUILayout.Label(new GUIContent("i", help ?? string.Empty), style, GUILayout.Width(22f), GUILayout.Height(22f));
         }
 
-        private void DrawTooltipOverlay()
+        /// <summary>
+        /// Shared tooltip overlay, drawn ON TOP of all windows at the hovered window's
+        /// top-left (virtual coordinates). Only the top-most pane under the mouse shows
+        /// it; drawing inside every pane would duplicate the box.
+        /// </summary>
+        private void DrawTooltipOverlay(List<WindowPane> drawOrder)
         {
             if (string.IsNullOrWhiteSpace(GUI.tooltip)) return;
+            var ev = Event.current;
+            if (ev == null) return;
+            var mouse = ev.mousePosition;
+            WindowPane hovered = null;
+            for (int i = 0; i < drawOrder.Count; i++)
+            {
+                if (drawOrder[i].Rect.Contains(mouse)) hovered = drawOrder[i];
+            }
+            if (hovered == null) return;
             var style = new GUIStyle(GUI.skin.box)
             {
                 wordWrap = true,
                 alignment = TextAnchor.UpperLeft,
                 padding = new RectOffset(10, 10, 8, 8)
             };
-            var width = Mathf.Min(460f, Mathf.Max(220f, _windowRect.width - 24f));
+            var width = Mathf.Min(460f, Mathf.Max(220f, hovered.Rect.width - 24f));
             var content = new GUIContent(GUI.tooltip);
             var height = Mathf.Min(170f, style.CalcHeight(content, width));
-            // Keep help overlays away from the fixed footer and destructive-action prompt.
-            GUI.Box(new Rect(12f, 32f, width, height), content, style);
+            GUI.Box(new Rect(hovered.Rect.x + 12f, hovered.Rect.y + 32f, width, height), content, style);
         }
 
         private bool IsNarrowLayout()
         {
-            return _windowRect.width < 600f;
+            var pane = _currentPane ?? _mainPane;
+            return FallbackWindowGeometry.IsNarrowLayout(pane.Rect.width);
         }
 
-        private void ConfigureWindowRect(bool center, float scale = 0f)
+        private void ConfigurePaneRect(WindowPane pane, bool center, float scale)
         {
             if (scale <= 0f) scale = CalculateScale(Screen.height);
-            var screenWidth = Screen.width > 0 ? Screen.width / scale : 1280f;
-            var screenHeight = Screen.height > 0 ? Screen.height / scale : 720f;
-            var maxWidth = Mathf.Max(1f, screenWidth * MaxWindowWidthRatio);
-            var maxHeight = Mathf.Max(1f, screenHeight * MaxWindowHeightRatio);
-            var minWidth = Mathf.Min(MinWindowWidth, maxWidth);
-            var minHeight = Mathf.Min(MinWindowHeight, maxHeight);
-
-            _windowRect.width = Mathf.Clamp(_windowRect.width, minWidth, maxWidth);
-            _windowRect.height = Mathf.Clamp(_windowRect.height, minHeight, maxHeight);
-            if (center)
-            {
-                _windowRect.x = (screenWidth - _windowRect.width) * 0.5f;
-                _windowRect.y = (screenHeight - _windowRect.height) * 0.5f;
-            }
-            else
-            {
-                _windowRect.x = Mathf.Clamp(_windowRect.x, 0f, Mathf.Max(0f, screenWidth - _windowRect.width));
-                _windowRect.y = Mathf.Clamp(_windowRect.y, 0f, Mathf.Max(0f, screenHeight - _windowRect.height));
-            }
+            var virtualWidth = FallbackWindowGeometry.VirtualExtent(Screen.width, scale, FallbackWindowGeometry.FallbackVirtualWidth);
+            var virtualHeight = FallbackWindowGeometry.VirtualExtent(Screen.height, scale, FallbackWindowGeometry.FallbackVirtualHeight);
+            var r = FallbackWindowGeometry.ClampWindowRect(
+                new RectF(pane.Rect.x, pane.Rect.y, pane.Rect.width, pane.Rect.height),
+                virtualWidth, virtualHeight,
+                pane.MinWidth, pane.MinHeight,
+                virtualWidth * pane.MaxWidthRatio, virtualHeight * pane.MaxHeightRatio,
+                center);
+            pane.Rect = new Rect(r.X, r.Y, r.Width, r.Height);
         }
 
         private static float CalculateScale(int screenHeight)
         {
-            if (screenHeight <= 0) return 1f;
-            return Mathf.Clamp(screenHeight / DesignHeight, 1f, 2f);
+            return FallbackWindowGeometry.CalculateScale(screenHeight);
         }
 
         private static InGroupSortMode DrawInGroupSort(InGroupSortMode current, UiTextCatalog text)

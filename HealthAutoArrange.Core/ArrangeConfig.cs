@@ -15,6 +15,9 @@ namespace HealthAutoArrange.Core
         /// <summary>v1.2.3 组内排序模式（同组内按效果强度或规则顺序排列）。</summary>
         public InGroupSortMode InGroupSortMode { get; }
 
+        /// <summary>v1.3.0：抑制档位变化的弹入动画重放（见 UnityUiAdapter.SuppressPopIn）。</summary>
+        public bool SuppressTierPopIn { get; }
+
         public IReadOnlyList<ReminderRule> Reminders { get; }
 
         public ArrangeConfig(
@@ -32,11 +35,23 @@ namespace HealthAutoArrange.Core
             UnknownStatePolicy unknownStatePolicy,
             InGroupSortMode inGroupSortMode,
             IReadOnlyList<ReminderRule> reminders)
+            : this(groupOrder, groupStates, unknownStatePolicy, inGroupSortMode, true, reminders)
+        {
+        }
+
+        public ArrangeConfig(
+            IReadOnlyList<string> groupOrder,
+            IReadOnlyDictionary<string, IReadOnlyList<string>> groupStates,
+            UnknownStatePolicy unknownStatePolicy,
+            InGroupSortMode inGroupSortMode,
+            bool suppressTierPopIn,
+            IReadOnlyList<ReminderRule> reminders)
         {
             GroupOrder = groupOrder ?? throw new System.ArgumentNullException(nameof(groupOrder));
             GroupStates = groupStates ?? throw new System.ArgumentNullException(nameof(groupStates));
             UnknownStatePolicy = unknownStatePolicy;
             InGroupSortMode = inGroupSortMode;
+            SuppressTierPopIn = suppressTierPopIn;
             Reminders = reminders ?? throw new System.ArgumentNullException(nameof(reminders));
         }
 
